@@ -1,50 +1,472 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+  ============================================================================
+  SYNC IMPACT REPORT
+  ============================================================================
+  Version change: 0.0.0 → 1.0.0 (MAJOR — initial ratification)
+
+  Added principles:
+    I.   Separation of Concerns (Hexagonal Architecture)
+    II.  Cross-Platform & Windows-First Compatibility
+    III. Async-First I/O
+    IV.  Structured Error Handling & Actionable Failures
+    V.   Plugin Registry Architecture
+    VI.  Data Safety & Non-Destructive Operations
+    VII. Subprocess Lifecycle Management
+    VIII.Encoding Guarantees
+    IX.  Observability & Structured Logging
+    X.   Test-First Discipline
+    XI.  Dependency Isolation & Vendoring Policy
+    XII. Simplicity & YAGNI
+
+  Added sections:
+    - Technology Stack & Constraints
+    - Forbidden Patterns
+    - Development Workflow
+    - Governance
+
+  Removed sections: none (initial version)
+
+  Templates requiring updates:
+    ✅ plan-template.md     — Constitution Check section will reference these
+                              principles; no structural changes needed
+    ✅ spec-template.md     — Requirements section compatible; FR numbering
+                              aligns with principle-driven mandate (no update)
+    ✅ tasks-template.md    — Phase structure compatible; observability and
+                              testing task types align (no update needed)
+    ✅ checklist-template.md — Category structure compatible (no update)
+
+  Follow-up TODOs: none
+  ============================================================================
+-->
+
+# Anime Studio v3 Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Separation of Concerns — Hexagonal Architecture
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+The monolithic coupling of UI, scraping, and subprocess management is the
+root cause of every legacy failure. The v3 architecture MUST enforce strict
+layer separation using a Hexagonal (Ports & Adapters) pattern with exactly
+five bounded domains:
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+1. **Domain Models** (`src/models/`): Pure data structures (Pydantic
+   `BaseModel` or `@dataclass`) with zero I/O, zero imports from other
+   layers. These define `SubtitleFile`, `FontAsset`, `MuxJob`,
+   `HunterResult`, and all forensic pipeline intermediates.
+2. **Core Forensics** (`src/core/`): Stateless, async service functions
+   that implement business logic — subtitle syncing, font matching, ASS
+   repair, mux planning. Core services accept and return Domain Models.
+   They MUST NOT import from the TUI, CLI, or Hunter layers.
+3. **Hunter Registry** (`src/hunters/`): A plugin-based registry of font
+   acquisition sources (web scrapers, API clients). Each hunter implements
+   a `HunterProtocol` and is discovered at runtime via entry-points or
+   explicit registration. The registry MUST NOT be hardcoded; adding a
+   hunter MUST NOT require modifying existing code (Open/Closed Principle).
+4. **Infrastructure / Adapters** (`src/adapters/`): All side-effectful
+   operations — subprocess calls (`ffmpeg`, `mkvmerge`, `alass`,
+   `ffsubsync`, `ots-sanitize`), filesystem access, network I/O via
+   `httpx`. Adapters implement port interfaces defined in `src/ports/`.
+5. **Presentation** (`src/tui/`): The Textual TUI application. The TUI
+   layer MUST be a pure consumer of Core services via message-passing and
+   async workers. It MUST NOT contain business logic, subprocess calls, or
+   direct filesystem manipulation.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+**Rationale**: Enforcing these boundaries guarantees that forensic engines
+can be tested without a running TUI, hunters can be developed in isolation,
+and the TUI can be replaced (e.g., with a web frontend) without touching
+core logic.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### II. Cross-Platform & Windows-First Compatibility
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+The primary runtime is Windows (Windows Terminal / PowerShell 7+), but all
+code MUST run unmodified on Linux and macOS. The following rules are
+NON-NEGOTIABLE:
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+- **Pathlib Everywhere**: All file path construction and manipulation MUST
+  use `pathlib.Path`. Raw string concatenation with `/` or `\\` separators
+  is FORBIDDEN. Path constants MUST be defined as `Path` objects.
+- **Executable Resolution**: Subprocess executables MUST be resolved via
+  `shutil.which()` before invocation. The caller MUST NOT hardcode `.exe`
+  extensions or assume PATH resolution behavior.
+- **UTF-8 Default**: All `open()` calls MUST explicitly pass
+  `encoding="utf-8"` (or the correct target encoding when intentionally
+  handling legacy codepages). Relying on the system default encoding is
+  FORBIDDEN. On Python 3.15+, `sys.flags.utf8_mode` may be assumed, but
+  explicit encoding MUST still be passed for backward compatibility.
+- **Line Endings**: Text files MUST be opened with `newline=""` when
+  precise line-ending control is required (e.g., ASS subtitle repair).
+- **Temp Directories**: Use `tempfile.mkdtemp()` or
+  `tempfile.TemporaryDirectory()` instead of hardcoded `/tmp` or
+  `%TEMP%` paths.
+- **Console Output**: Never assume ANSI escape code support. The Textual
+  framework handles terminal capability detection. Direct `print()`
+  with ANSI codes outside the TUI is FORBIDDEN.
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+### III. Async-First I/O
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+Every I/O operation — network, filesystem, subprocess — MUST be
+non-blocking. The legacy `urllib` + synchronous subprocess pattern that
+froze the UI is FORBIDDEN.
+
+- **Network**: All HTTP requests MUST use `httpx.AsyncClient` with
+  explicit timeouts, connection pooling, and retry policies. Raw `urllib`,
+  `requests`, or synchronous `httpx` calls are FORBIDDEN.
+- **Subprocess**: All external tool invocations MUST use
+  `asyncio.create_subprocess_exec()` (or the adapter abstraction wrapping
+  it). Blocking `subprocess.run()` / `subprocess.Popen()` with
+  synchronous `.communicate()` is FORBIDDEN outside of test fixtures.
+- **Filesystem**: For large file operations (reading MKV metadata, bulk
+  font scanning), use `asyncio.to_thread()` to offload blocking calls.
+  Small metadata reads (`Path.stat()`, `Path.exists()`) MAY remain
+  synchronous when called outside the TUI event loop.
+- **Concurrency Model**: The application MUST use a single `asyncio` event
+  loop. Textual's built-in worker system (`self.run_worker()`) MUST be
+  used for background tasks within the TUI. Manual thread creation is
+  FORBIDDEN unless wrapping a fundamentally blocking C library.
+
+### IV. Structured Error Handling & Actionable Failures
+
+Raw tracebacks MUST NEVER be displayed to the user. Every failure MUST be
+translated into a structured, actionable error.
+
+- **ToolResult Pattern**: All subprocess adapter calls MUST return a
+  `ToolResult` model containing: `success: bool`, `exit_code: int`,
+  `stdout: str`, `stderr: str`, `tool_name: str`, `duration_ms: float`,
+  and `suggestion: str | None`. The `suggestion` field MUST contain a
+  human-readable remediation hint (e.g., "alass failed — try installing
+  alass v2.0+ or check subtitle encoding").
+- **Error Taxonomy**: Define a hierarchy of domain exceptions in
+  `src/errors.py`:
+  - `AnimeStudioError` (base)
+    - `ToolNotFoundError` (external binary missing)
+    - `ToolExecutionError` (binary ran but returned non-zero)
+    - `EncodingRepairError` (ASS/subtitle encoding unfixable)
+    - `FontMatchError` (no font match found after all hunters exhausted)
+    - `MuxIntegrityError` (MKV structure validation failed post-mux)
+    - `HunterError` (font source unreachable or rate-limited)
+    - `ConfigurationError` (invalid user config)
+- **Boundary Rule**: Exceptions MUST be caught at adapter boundaries and
+  converted to `ToolResult` or domain-specific errors. Core services MUST
+  raise domain exceptions, never `OSError`, `httpx.HTTPError`, or
+  `subprocess.CalledProcessError` directly.
+- **TUI Contract**: The TUI MUST present errors via styled notification
+  widgets (Textual `Notify` / modal dialogs), never via `stderr` dumps.
+
+### V. Plugin Registry Architecture
+
+The legacy hardcoded dictionaries that caused `KeyError` crashes are
+FORBIDDEN. All extensible collections MUST use a Registry pattern.
+
+- **Hunter Registry**: Font acquisition sources MUST implement the
+  `HunterProtocol` (a `typing.Protocol` or ABC):
+  ```
+  class HunterProtocol(Protocol):
+      name: str
+      priority: int
+      async def search(self, query: FontQuery) -> list[HunterResult]: ...
+      async def download(self, result: HunterResult) -> FontPayload: ...
+      def supports(self, query: FontQuery) -> bool: ...
+  ```
+  Hunters are registered via a `HunterRegistry` that supports:
+  - Runtime registration (`registry.register(hunter)`)
+  - Priority-ordered iteration
+  - Graceful skip on individual hunter failure (the registry continues to
+    the next hunter)
+- **Source Registry**: Subtitle/media source labels (e.g., streaming
+  services, fansub groups) MUST be loaded from a TOML/YAML config file at
+  startup, never hardcoded. Adding a new source MUST NOT require code
+  changes.
+- **Tool Registry**: External tool binaries (`ffmpeg`, `mkvmerge`,
+  `alass`, `ffsubsync`, `ots-sanitize`, `fontTools`) MUST be registered
+  with their resolved paths at startup via `shutil.which()`. Missing
+  optional tools MUST be logged as warnings; missing required tools MUST
+  raise `ToolNotFoundError` with installation instructions.
+
+### VI. Data Safety & Non-Destructive Operations
+
+User data is sacred. The system MUST NEVER destroy original files.
+
+- **Trash Directory**: When an operation would overwrite or remove an
+  original subtitle file, the original MUST be moved to a
+  `.anime_studio_trash/` directory (sibling to the source file) with a
+  timestamped suffix (e.g., `original.ass.2025-05-17T103000`).
+- **Atomic Writes**: Output files (muxed MKVs, repaired ASS files) MUST
+  be written to a temporary file first, then atomically renamed to the
+  target path. Partial writes MUST NOT leave corrupted files.
+- **Dry-Run Mode**: All destructive operations (muxing, font attachment,
+  subtitle replacement) MUST support a `--dry-run` flag that reports what
+  would change without modifying any files.
+- **Idempotency**: Running the same operation twice on the same input MUST
+  produce the same output without duplicating attachments or corrupting
+  existing subtitle tracks.
+
+### VII. Subprocess Lifecycle Management
+
+External tools are the backbone of Anime Studio. Their execution MUST be
+robust, observable, and recoverable.
+
+- **Fallback Chains**: Critical operations MUST define ordered fallback
+  strategies. Example for subtitle syncing:
+  1. Attempt `alass` (fast, reference-based)
+  2. On failure → attempt `ffsubsync` with VAD pipeline
+  3. On failure → report structured error with both tool outputs
+- **Timeout Enforcement**: Every subprocess MUST have a configurable
+  timeout (default: 120s for sync operations, 300s for muxing). On
+  timeout, the process MUST be killed and a `ToolExecutionError` raised.
+- **JSON-First Communication**: Where tools support it (e.g.,
+  `mkvmerge -J`), MUST use structured JSON output. Parse results into
+  domain models immediately.
+- **Stderr Capture**: All subprocess stderr MUST be captured and included
+  in `ToolResult` for diagnostics, but MUST NOT be forwarded to the
+  user's terminal.
+
+### VIII. Encoding Guarantees
+
+Encoding bugs are the #1 cause of subtitle corruption. The following
+pipeline is MANDATORY for all subtitle ingestion:
+
+1. **Detection**: Use `charset_normalizer` (preferred) or `chardet` to
+   detect source encoding. MUST NOT assume UTF-8.
+2. **Normalization**: Transcode all detected encodings to UTF-8 with BOM
+   stripped. Handle `cp1252`, `UTF-16 LE/BE`, `Shift_JIS`, `EUC-KR`, and
+   `ISO-8859-1` explicitly.
+3. **Line Ending Repair**: Normalize to `\r\n` for ASS format
+   compatibility (ASS spec mandates Windows line endings).
+4. **Validation**: After transcoding, parse the ASS file with a lenient
+   parser to verify structural integrity (section headers, dialogue line
+   counts). Log warnings for recoverable issues; raise
+   `EncodingRepairError` for unrecoverable corruption.
+5. **Round-Trip Safety**: The encoding pipeline MUST be idempotent —
+   running it on an already-repaired file MUST produce identical output.
+
+### IX. Observability & Structured Logging
+
+Every operation MUST be traceable for debugging without exposing internals
+to end users.
+
+- **Structured Logging**: Use Python's `logging` module with
+  `structlog` for JSON-formatted log output. Every log entry MUST include:
+  `timestamp`, `level`, `module`, `event`, and relevant context fields
+  (e.g., `file_path`, `tool_name`, `duration_ms`).
+- **Log Levels**:
+  - `DEBUG`: Subprocess commands, raw stdout/stderr, internal state
+  - `INFO`: Operation start/complete, file counts, hunter results
+  - `WARNING`: Fallback triggered, optional tool missing, recoverable
+    encoding issue
+  - `ERROR`: Operation failed, tool crashed, unrecoverable error
+- **Log Destination**: Logs MUST be written to a rotating file
+  (`~/.anime_studio/logs/`). The TUI MUST NOT display raw log lines;
+  instead, it MUST surface a curated activity feed derived from `INFO`+
+  events.
+- **Operation Tracking**: Long-running operations (muxing, bulk font
+  search) MUST emit progress events that the TUI can render as progress
+  bars or spinners.
+
+### X. Test-First Discipline
+
+Tests are NOT optional. The following testing mandate applies:
+
+- **Unit Tests**: All Core Forensics functions MUST have unit tests with
+  mocked adapters. Minimum coverage target: 85% for `src/core/`.
+- **Integration Tests**: Subprocess adapters MUST have integration tests
+  that run against real binaries (gated behind a `pytest` marker
+  `@pytest.mark.integration` for CI environments without tools installed).
+- **Contract Tests**: Hunter protocol compliance MUST be verified via
+  contract tests that assert the `HunterProtocol` interface.
+- **Encoding Tests**: The encoding pipeline MUST include tests with real
+  sample files in `cp1252`, `UTF-16 LE`, `Shift_JIS`, and `UTF-8 BOM`
+  encodings.
+- **Framework**: `pytest` with `pytest-asyncio` for async tests. Test
+  files MUST mirror source structure under `tests/`.
+- **No Mocking Core Logic**: Core forensic functions MUST NOT be mocked
+  in their own unit tests. Only adapters (I/O boundaries) are mocked.
+
+### XI. Dependency Isolation & Vendoring Policy
+
+The dependency tree MUST be minimal, audited, and pinned.
+
+- **Package Manager**: `uv` (preferred) or `pip` with a locked
+  `requirements.lock` (or `uv.lock`). Unpinned dependencies are
+  FORBIDDEN in production.
+- **Core Dependencies** (approved):
+  - `textual` — TUI framework
+  - `httpx` — async HTTP client
+  - `pydantic` — data validation and settings
+  - `fonttools` — font introspection and repair
+  - `charset-normalizer` — encoding detection
+  - `structlog` — structured logging
+  - `tomli` / `tomllib` — configuration parsing
+- **Conditional Dependencies**: `alass`, `ffsubsync`, `ots-sanitize` are
+  external binaries, NOT Python packages. They MUST be resolved at runtime
+  via the Tool Registry, never imported.
+- **Vendoring**: No vendoring. All dependencies MUST be installable via
+  `pip` / `uv` from PyPI.
+- **Python Version**: Python 3.11+ is REQUIRED. Code MUST use modern
+  syntax: `match` statements, `type` aliases (3.12+), `ExceptionGroup`
+  where beneficial, and `asyncio.TaskGroup` for structured concurrency.
+
+### XII. Simplicity & YAGNI
+
+Complexity MUST be justified. Every abstraction MUST earn its existence.
+
+- **No Premature Abstraction**: Do not create interfaces, factories, or
+  registries for components that currently have exactly one implementation.
+  Exception: the Hunter Registry, which is designed for extensibility from
+  day one.
+- **Flat Over Nested**: Prefer flat module structures. If a package has
+  only one module, it SHOULD be a single file, not a package.
+- **Configuration**: Use a single `config.toml` file with Pydantic
+  `BaseSettings` for validation. Environment variable overrides MUST
+  follow `ANIME_STUDIO_` prefix convention.
+- **No ORM**: Font and subtitle metadata are transient, not persisted to a
+  database. Use Pydantic models, not SQLAlchemy.
+- **Feature Flags**: Features under development MUST be gated behind
+  config flags, not `if False:` blocks or commented-out code.
+
+## Technology Stack & Constraints
+
+| Component           | Technology                     | Rationale                                          |
+|---------------------|--------------------------------|----------------------------------------------------|
+| Language            | Python 3.11+                   | `asyncio.TaskGroup`, `tomllib`, `match` statements |
+| TUI Framework       | Textual 1.x                   | Async-native, CSS styling, Nerd Font support       |
+| HTTP Client         | httpx (async)                  | HTTP/2, connection pooling, timeout control        |
+| Data Validation     | Pydantic v2                    | Performance, JSON Schema export, settings mgmt     |
+| Font Introspection  | fontTools                      | Industry standard for OpenType/TrueType parsing    |
+| Encoding Detection  | charset-normalizer             | Better accuracy than chardet, maintained            |
+| Logging             | structlog + stdlib logging     | Structured JSON logs, zero-config dev mode         |
+| Configuration       | TOML (tomllib / tomli)         | Human-readable, stdlib in 3.11+                    |
+| Testing             | pytest + pytest-asyncio        | De-facto standard, async support                   |
+| Package Management  | uv (preferred) or pip          | Speed, lockfile support                            |
+| Subprocess Sync     | alass → ffsubsync (fallback)   | Quality-ordered fallback chain                     |
+| Font Sanitization   | ots-sanitize (fallback)        | Catches fontTools-unrepairable corruption           |
+| Muxing              | mkvmerge (MKVToolNix)          | Industry standard for Matroska operations          |
+
+## Forbidden Patterns
+
+The following patterns are EXPLICITLY FORBIDDEN and MUST be rejected in
+code review:
+
+| Pattern                              | Replacement                                        |
+|--------------------------------------|----------------------------------------------------|
+| `os.path.join()` / string paths      | `pathlib.Path` operators                           |
+| `urllib.request` / `requests`        | `httpx.AsyncClient`                                |
+| `subprocess.run()` (blocking)        | `asyncio.create_subprocess_exec()`                 |
+| `open()` without `encoding=`        | `open(encoding="utf-8")` (or explicit encoding)   |
+| Hardcoded dicts for extensible sets  | Registry / Plugin pattern                          |
+| `print()` for user output            | Textual widgets / `structlog` for logs             |
+| Bare `except:` or `except Exception` | Specific exception types + `ToolResult` wrapping   |
+| `os.system()`                        | `asyncio.create_subprocess_exec()`                 |
+| Global mutable state                 | Dependency injection via constructor / config      |
+| `time.sleep()` in async code         | `asyncio.sleep()`                                  |
+| Hardcoded `.exe` in binary names     | `shutil.which()` resolution                        |
+| `curses` or direct `rich` usage      | Textual TUI framework exclusively                  |
+| `sys.exit()` in library code         | Raise domain exception; only CLI entry point exits |
+
+## Development Workflow
+
+### Branch Strategy
+
+- `main` — stable, release-ready code only
+- `feature/###-description` — all development work
+- Merge via pull request with passing CI
+
+### Commit Convention
+
+All commits MUST follow Conventional Commits format:
+
+```
+<type>(<scope>): <description>
+
+Types: feat, fix, refactor, test, docs, chore, ci
+Scopes: core, tui, hunters, adapters, models, config
+```
+
+### Code Quality Gates
+
+Every pull request MUST pass:
+
+1. `ruff check .` — linting (zero warnings)
+2. `ruff format --check .` — formatting
+3. `pytest tests/unit/` — unit tests (100% pass)
+4. `mypy src/ --strict` — type checking (zero errors)
+5. Constitution compliance review (manual or automated)
+
+### File Organization
+
+```text
+anime_studio/
+├── src/
+│   ├── __init__.py
+│   ├── __main__.py          # Entry point
+│   ├── app.py               # Textual App subclass
+│   ├── config.py            # Pydantic BaseSettings
+│   ├── errors.py            # Exception taxonomy
+│   ├── models/              # Pure data models (Pydantic)
+│   │   ├── subtitle.py
+│   │   ├── font.py
+│   │   ├── mux.py
+│   │   └── tool_result.py
+│   ├── ports/               # Abstract interfaces (Protocols)
+│   │   ├── subprocess.py
+│   │   ├── font_hunter.py
+│   │   └── filesystem.py
+│   ├── core/                # Business logic (stateless, async)
+│   │   ├── subtitle_sync.py
+│   │   ├── font_match.py
+│   │   ├── ass_repair.py
+│   │   ├── mux_planner.py
+│   │   └── encoding.py
+│   ├── adapters/            # I/O implementations
+│   │   ├── ffmpeg.py
+│   │   ├── mkvmerge.py
+│   │   ├── alass.py
+│   │   ├── ffsubsync.py
+│   │   ├── ots_sanitize.py
+│   │   └── filesystem.py
+│   ├── hunters/             # Font acquisition plugins
+│   │   ├── registry.py
+│   │   ├── base.py
+│   │   └── sources/
+│   │       ├── google_fonts.py
+│   │       ├── dafont.py
+│   │       └── ...
+│   └── tui/                 # Textual UI components
+│       ├── screens/
+│       ├── widgets/
+│       └── styles/
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   ├── contract/
+│   └── fixtures/
+├── config.toml
+├── pyproject.toml
+└── README.md
+```
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+This constitution is the supreme authority for all architectural and
+coding decisions in Anime Studio v3. It supersedes README files, inline
+comments, and verbal agreements.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+- **Amendment Process**: Any change to this constitution MUST be:
+  1. Proposed as a diff in a dedicated PR
+  2. Reviewed and approved by the project maintainer
+  3. Accompanied by a migration plan if the change affects existing code
+  4. Version-bumped according to semantic versioning (see below)
+- **Compliance Enforcement**: All pull requests MUST include a
+  "Constitution Check" section confirming compliance with relevant
+  principles. Reviewers MUST verify compliance before approving.
+- **Versioning**: This constitution follows semantic versioning:
+  - **MAJOR**: Backward-incompatible principle removal or redefinition
+  - **MINOR**: New principle added or existing principle materially expanded
+  - **PATCH**: Wording clarification, typo fix, non-semantic refinement
+- **Conflict Resolution**: When a principle conflicts with a practical
+  implementation need, the conflict MUST be documented in the Complexity
+  Tracking table (plan-template.md) with justification for the deviation.
+- **Guidance File**: For runtime development guidance and quick-reference
+  rules, consult `AGENTS.md` at the repository root.
+
+**Version**: 1.0.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-17
