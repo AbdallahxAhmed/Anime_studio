@@ -2,40 +2,53 @@
   ============================================================================
   SYNC IMPACT REPORT
   ============================================================================
-  Version change: 0.0.0 → 1.0.0 (MAJOR — initial ratification)
+  Version change: 1.1.0 → 1.4.0 (3 MINOR bumps combined)
 
-  Added principles:
-    I.   Separation of Concerns (Hexagonal Architecture)
-    II.  Cross-Platform & Windows-First Compatibility
-    III. Async-First I/O
-    IV.  Structured Error Handling & Actionable Failures
+  Amended principles:
     V.   Plugin Registry Architecture
-    VI.  Data Safety & Non-Destructive Operations
-    VII. Subprocess Lifecycle Management
-    VIII.Encoding Guarantees
+         + Circuit Breaker & Rate Limiting mandate for HunterProtocol
     IX.  Observability & Structured Logging
-    X.   Test-First Discipline
-    XI.  Dependency Isolation & Vendoring Policy
-    XII. Simplicity & YAGNI
+         + Cache Versioning mandate for persistent cache files
 
   Added sections:
-    - Technology Stack & Constraints
-    - Forbidden Patterns
-    - Development Workflow
-    - Governance
+    X-bis. Pipeline Report Generation (new principle, v1.1.0)
+    XIII.  Distribution & External Dependencies (new principle, v1.2.0)
+           + Tool Discovery Order (Windows-first, 5-step)
+           + Binary classification (CRITICAL / OPTIONAL / ALWAYS AVAILABLE)
+           + Distribution via install.ps1 + run.bat/run.ps1
+           + mpv-config independence mandate (v1.3.0)
+           + sub-fonts-dir FORBIDDEN, MKV muxing only (v1.3.0)
+           + Storage layout: volatile C: + permanent D: (v1.4.0)
 
-  Removed sections: none (initial version)
+  Removed sections: none
 
   Templates requiring updates:
-    ✅ plan-template.md     — Constitution Check section will reference these
-                              principles; no structural changes needed
-    ✅ spec-template.md     — Requirements section compatible; FR numbering
-                              aligns with principle-driven mandate (no update)
-    ✅ tasks-template.md    — Phase structure compatible; observability and
-                              testing task types align (no update needed)
-    ✅ checklist-template.md — Category structure compatible (no update)
+    ✅ plan-template.md      — Constitution Check now covers V (circuit
+                               breaker), IX (cache versioning), X-bis
+                               (report generation), XIII (distribution)
+    ✅ spec-template.md      — No update needed
+    ✅ tasks-template.md     — Tool discovery + storage layout may spawn
+                               new task types; no structural template change
+    ✅ checklist-template.md — No update needed
 
-  Follow-up TODOs: none
+  Migration notes:
+    - HunterProtocol implementations MUST add `rate_limit` and
+      `circuit_breaker_threshold` fields
+    - `src/config.py` MUST define `CACHE_VERSION` constant
+    - Pipeline runner MUST produce `_AnimeStudio_Report.md`
+    - Tool discovery MUST follow 5-step Windows-first order
+    - Storage paths: %APPDATA% for config, D:\Entertainment for data
+    - mpv-config MUST NOT be depended on or modified
+    - sub-fonts-dir usage is FORBIDDEN
+    - font_cache on D: is self-describing, no config dependency
+
+  Follow-up TODOs:
+    - Update HunterProtocol definition in src/ports/font_hunter.py
+    - Add CACHE_VERSION to src/config.py
+    - Implement report generation in pipeline runner
+    - Implement 5-step tool discovery in src/adapters/
+    - Create install.ps1 and run.bat/run.ps1
+    - Implement storage layout with C:/D: split
   ============================================================================
 -->
 
@@ -164,6 +177,8 @@ FORBIDDEN. All extensible collections MUST use a Registry pattern.
   class HunterProtocol(Protocol):
       name: str
       priority: int
+      rate_limit: float                  # max requests/sec to this source
+      circuit_breaker_threshold: int     # consecutive failures before open (default: 3)
       async def search(self, query: FontQuery) -> list[HunterResult]: ...
       async def download(self, result: HunterResult) -> FontPayload: ...
       def supports(self, query: FontQuery) -> bool: ...
@@ -173,6 +188,15 @@ FORBIDDEN. All extensible collections MUST use a Registry pattern.
   - Priority-ordered iteration
   - Graceful skip on individual hunter failure (the registry continues to
     the next hunter)
+- **Circuit Breaker & Rate Limiting**: Every `HunterProtocol`
+  implementation MUST declare:
+  - `rate_limit: float` — maximum requests per second to this source
+  - `circuit_breaker_threshold: int` — consecutive failures before
+    the circuit opens (default: 3)
+
+  The `HunterRegistry` MUST track failure counts per hunter per session.
+  When a hunter's circuit is open, the registry MUST skip it silently
+  and log a WARNING. The circuit resets at session start.
 - **Source Registry**: Subtitle/media source labels (e.g., streaming
   services, fansub groups) MUST be loaded from a TOML/YAML config file at
   startup, never hardcoded. Adding a new source MUST NOT require code
@@ -259,9 +283,30 @@ to end users.
   (`~/.anime_studio/logs/`). The TUI MUST NOT display raw log lines;
   instead, it MUST surface a curated activity feed derived from `INFO`+
   events.
+- **Cache Versioning**: Any persistent cache file written by
+  Anime Studio MUST include a top-level `cache_version` field
+  matching the constant `CACHE_VERSION` defined in `src/config.py`.
+  On load, if `cache_version` mismatches, the cache MUST be
+  deleted and rebuilt from scratch. Silent reads of stale cache
+  are FORBIDDEN.
 - **Operation Tracking**: Long-running operations (muxing, bulk font
   search) MUST emit progress events that the TUI can render as progress
   bars or spinners.
+
+### X-bis. Pipeline Report Generation
+
+Every full pipeline run MUST produce a structured Markdown report
+saved to the anime library root as `_AnimeStudio_Report.md`.
+The report MUST include:
+- Run timestamp and duration
+- Per-episode status: ✓ complete / ⚠ partial / ✗ failed
+- Per-font status: source used, layer that found it, cache hit/miss
+- Any Rule applications (Rule 2 escalations, Rule 3 patches)
+- Genuine misses with full audit trail (what was searched, why failed)
+
+The report MUST be overwritten on each full pipeline run (single
+canonical report, not accumulated). Partial/incremental runs MUST
+append to the existing report with a clearly delimited section header.
 
 ### X. Test-First Discipline
 
@@ -323,6 +368,67 @@ Complexity MUST be justified. Every abstraction MUST earn its existence.
   database. Use Pydantic models, not SQLAlchemy.
 - **Feature Flags**: Features under development MUST be gated behind
   config flags, not `if False:` blocks or commented-out code.
+
+### XIII. Distribution & External Dependencies
+
+#### Tool Discovery
+
+External binary resolution MUST follow this Windows-first discovery
+order. The first match wins:
+
+1. `~\scoop\shims\<tool>.exe`
+2. `~\scoop\apps\<tool>\current\**\<tool>.exe`
+3. `C:\Program Files\mpv\<tool>.exe`
+4. `C:\Program Files\<Tool>\**\<tool>.exe`
+5. `shutil.which(<tool>)`
+
+On non-Windows platforms, only step 5 applies.
+
+Binary classifications:
+
+| Classification | Binaries | Behavior |
+|----------------|----------|----------|
+| **CRITICAL** (app refuses to start) | `ffmpeg`, `mkvmerge`, `mkvextract` | Raise `ToolNotFoundError` with install instructions |
+| **OPTIONAL** (reduced features + WARNING) | `alass`, `ots-sanitize`, `yt-dlp` | Log WARNING, disable dependent features |
+| **ALWAYS AVAILABLE** (via `uv`) | `ffsubsync`, `fonttools`, `charset-normalizer` | Installed as Python packages, no binary resolution needed |
+
+#### Distribution
+
+- **Installer**: `install.ps1` handles `uv` + `winget` setup
+- **Launchers**: `run.bat` / `run.ps1` activate venv and invoke entry point
+- **Virtual Environment**: `uv` managed at
+  `D:\Entertainment\.anime_studio\venv\`
+
+#### mpv-config Independence
+
+`mpv-config` (`github.com/AbdallahxAhmed/mpv-config`) is an independent
+project. Anime Studio v3 MUST NOT depend on it or modify it. Its binaries
+(e.g., `ffmpeg`, `mpv`) are discovery candidates only (step 3 above).
+
+- `sub-fonts-dir` is **FORBIDDEN** — known mpv bugs confirmed.
+- MKV muxing via `mkvmerge` is the **ONLY** font output method.
+- No `fonts\` folder creation. No mpv config modification.
+
+#### Storage Layout
+
+Storage is designed for volatile `C:` + permanent `D:` separation:
+
+**Volatile** (recreatable on Windows reinstall):
+- `%APPDATA%\AnimeStudio\config.toml` — user preferences only
+- If missing on startup: recreated from defaults silently.
+
+**Permanent** (survives Windows reinstall):
+```text
+D:\Entertainment\.anime_studio\
+├── font_cache\        # all downloaded fonts, NEVER deleted
+├── font_library.toml  # index with CACHE_VERSION = "3.0"
+├── logs\              # pipeline history
+└── venv\              # uv managed Python environment
+```
+
+**Resolution rule**: if `font_cache` exists on `D:` → use it
+regardless of whether `config.toml` exists on `C:`.
+Cache is self-describing — no config needed to find it.
 
 ## Technology Stack & Constraints
 
@@ -469,4 +575,4 @@ comments, and verbal agreements.
 - **Guidance File**: For runtime development guidance and quick-reference
   rules, consult `AGENTS.md` at the repository root.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-17
+**Version**: 1.4.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-18
