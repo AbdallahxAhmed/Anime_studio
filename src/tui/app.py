@@ -1,4 +1,4 @@
-from textual.app import App, ComposeResult
+from textual.app import App
 from src.core.pipeline_runner import PipelineRunner
 from src.tui.screens.dashboard import DashboardScreen
 
@@ -13,10 +13,10 @@ class AnimeStudioApp(App):
         ("d", "toggle_dark", "Toggle Dark Mode"),
     ]
 
+    def on_mount(self) -> None:
+        self.push_screen(DashboardScreen())
+
     def __init__(self, pipeline_runner: PipelineRunner) -> None:
         self.pipeline_runner = pipeline_runner
         self.log_bridge = None
         super().__init__()
-
-    def compose(self) -> ComposeResult:
-        yield DashboardScreen()

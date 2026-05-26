@@ -24,11 +24,12 @@ def mock_pipeline_runner():
 @pytest.mark.asyncio
 async def test_app_launches_dashboard(mock_pipeline_runner):
     app = AnimeStudioApp(pipeline_runner=mock_pipeline_runner)
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.pause()
         # Check DashboardScreen is mounted
         from src.tui.screens.dashboard import DashboardScreen
 
-        assert app.query_one(DashboardScreen) is not None
+        assert isinstance(app.screen, DashboardScreen)
 
         # Verify inputs and buttons exist
         path_input = app.screen.query_one("#library-path")
@@ -67,11 +68,11 @@ async def test_fatal_pipeline_error_shows_modal(mock_pipeline_runner):
     from src.tui.messages import PipelineError
     from src.errors import ToolNotFoundError
     from src.tui.widgets.error_modal import ErrorModal
-    from src.tui.screens.dashboard import DashboardScreen
 
     app = AnimeStudioApp(pipeline_runner=mock_pipeline_runner)
     async with app.run_test() as pilot:
-        dashboard = app.query_one(DashboardScreen)
+        await pilot.pause()
+        dashboard = app.screen
         err = ToolNotFoundError("mkvmerge not found")
         dashboard.post_message(PipelineError(error=err, fatal=True))
         await pilot.pause()
@@ -91,11 +92,11 @@ async def test_non_fatal_pipeline_error_shows_toast(mock_pipeline_runner):
     from unittest.mock import patch
     from src.tui.messages import PipelineError
     from src.errors import FontMatchError
-    from src.tui.screens.dashboard import DashboardScreen
 
     app = AnimeStudioApp(pipeline_runner=mock_pipeline_runner)
     async with app.run_test() as pilot:
-        dashboard = app.query_one(DashboardScreen)
+        await pilot.pause()
+        dashboard = app.screen
         err = FontMatchError("Could not resolve Arial")
 
         with patch.object(app, "notify") as mock_notify:
@@ -111,11 +112,11 @@ async def test_non_fatal_pipeline_error_shows_toast(mock_pipeline_runner):
 async def test_generic_pipeline_error_shows_unhandled_modal(mock_pipeline_runner):
     from src.tui.messages import PipelineError
     from src.tui.widgets.error_modal import ErrorModal
-    from src.tui.screens.dashboard import DashboardScreen
 
     app = AnimeStudioApp(pipeline_runner=mock_pipeline_runner)
     async with app.run_test() as pilot:
-        dashboard = app.query_one(DashboardScreen)
+        await pilot.pause()
+        dashboard = app.screen
         err = ValueError("Something weird happened")
         dashboard.post_message(PipelineError(error=err, fatal=True))
         await pilot.pause()
@@ -127,11 +128,11 @@ async def test_generic_pipeline_error_shows_unhandled_modal(mock_pipeline_runner
 
 @pytest.mark.asyncio
 async def test_checkbox_toggle_sets_dry_run(mock_pipeline_runner):
-    from src.tui.screens.dashboard import DashboardScreen
 
     app = AnimeStudioApp(pipeline_runner=mock_pipeline_runner)
     async with app.run_test() as pilot:
-        dashboard = app.query_one(DashboardScreen)
+        await pilot.pause()
+        dashboard = app.screen
         path_input = dashboard.query_one("#library-path")
         path_input.value = "D:\\Anime"
 
