@@ -80,7 +80,8 @@ async def test_fatal_pipeline_error_shows_modal(mock_pipeline_runner):
         assert "Critical Dependency Missing" in app.screen.error_title
         assert "mkvmerge not found" in app.screen.error_message
 
-        await pilot.click("#dismiss-button")
+        dismiss_btn = app.screen.query_one("#dismiss-button")
+        dismiss_btn.press()
         await pilot.pause()
         assert not isinstance(app.screen, ErrorModal)
 
