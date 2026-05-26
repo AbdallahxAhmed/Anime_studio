@@ -2,11 +2,23 @@
   ============================================================================
   SYNC IMPACT REPORT
   ============================================================================
-  Version change: 1.1.0 → 1.4.0 (3 MINOR bumps combined)
+  Version change: 1.1.0 → 1.5.0 (4 MINOR bumps combined)
 
   Amended principles:
+    III. Async-First I/O
+         + Disk I/O Protection: asyncio.Semaphore for bulk mux/extract
+           (max 3 concurrent) to prevent disk thrashing (v1.5.0)
+         + Network Proxying: httpx.AsyncClient MUST accept proxy settings
+           from config.toml (v1.5.0)
     V.   Plugin Registry Architecture
          + Circuit Breaker & Rate Limiting mandate for HunterProtocol
+    VI.  Data Safety & Non-Destructive Operations
+         + Silent Auto-Cleanup: .anime_studio_trash/ managed by background
+           task, deletes files >30 days old without user prompts (v1.5.0)
+    VIII. Encoding Guarantees
+         + Arabic Heuristic Fallback: if charset-normalizer detects cp1252
+           but output lacks standard English / contains gibberish, fallback
+           to Windows-1256 (cp1256) for legacy Arabic fansubs (v1.5.0)
     IX.  Observability & Structured Logging
          + Cache Versioning mandate for persistent cache files
 
@@ -23,8 +35,10 @@
   Removed sections: none
 
   Templates requiring updates:
-    ✅ plan-template.md      — Constitution Check now covers V (circuit
-                               breaker), IX (cache versioning), X-bis
+    ✅ plan-template.md      — Constitution Check now covers III (disk I/O
+                               protection, network proxying), V (circuit
+                               breaker), VI (auto-cleanup), VIII (Arabic
+                               fallback), IX (cache versioning), X-bis
                                (report generation), XIII (distribution)
     ✅ spec-template.md      — No update needed
     ✅ tasks-template.md     — Tool discovery + storage layout may spawn
@@ -41,6 +55,11 @@
     - mpv-config MUST NOT be depended on or modified
     - sub-fonts-dir usage is FORBIDDEN
     - font_cache on D: is self-describing, no config dependency
+    - Bulk mux/extract adapters MUST acquire `disk_io_semaphore`
+      (asyncio.Semaphore(3)) before launching subprocess
+    - httpx.AsyncClient instantiation MUST read `proxy` from config.toml
+    - .anime_studio_trash/ cleanup task MUST run on app startup
+    - Encoding pipeline MUST implement cp1252→cp1256 Arabic heuristic
 
   Follow-up TODOs:
     - Update HunterProtocol definition in src/ports/font_hunter.py
@@ -49,6 +68,10 @@
     - Implement 5-step tool discovery in src/adapters/
     - Create install.ps1 and run.bat/run.ps1
     - Implement storage layout with C:/D: split
+    - Add disk_io_semaphore to src/config.py or adapter base
+    - Add proxy config field to BaseSettings in src/config.py
+    - Implement trash auto-cleanup background task
+    - Implement Arabic heuristic fallback in src/core/encoding.py
   ============================================================================
 -->
 
@@ -125,6 +148,13 @@ froze the UI is FORBIDDEN.
 - **Network**: All HTTP requests MUST use `httpx.AsyncClient` with
   explicit timeouts, connection pooling, and retry policies. Raw `urllib`,
   `requests`, or synchronous `httpx` calls are FORBIDDEN.
+- **Network Proxying**: Every `httpx.AsyncClient` instantiation MUST
+  accept proxy settings from `config.toml` (field: `proxy`). When
+  `proxy` is set (e.g., `"socks5://127.0.0.1:1080"`), the client MUST
+  pass it as the `proxy` argument. When unset or empty, no proxy is
+  configured. Hardcoding proxy URLs or ignoring the config field is
+  FORBIDDEN. This ensures users behind corporate firewalls, VPNs, or
+  censored networks can operate without code changes.
 - **Subprocess**: All external tool invocations MUST use
   `asyncio.create_subprocess_exec()` (or the adapter abstraction wrapping
   it). Blocking `subprocess.run()` / `subprocess.Popen()` with
@@ -133,6 +163,14 @@ froze the UI is FORBIDDEN.
   font scanning), use `asyncio.to_thread()` to offload blocking calls.
   Small metadata reads (`Path.stat()`, `Path.exists()`) MAY remain
   synchronous when called outside the TUI event loop.
+- **Disk I/O Protection**: Bulk muxing and extraction operations (any
+  adapter calling `mkvmerge`, `mkvextract`, or `ffmpeg` for file-level
+  I/O) MUST acquire a shared `asyncio.Semaphore` before launching the
+  subprocess. The semaphore MUST default to `max_concurrent=3` (overridable
+  via `config.toml` field `max_concurrent_disk_io`). This prevents disk
+  thrashing when processing large anime libraries. The semaphore MUST be
+  application-scoped (singleton lifetime) and injected into adapters via
+  constructor or config, never created per-call.
 - **Concurrency Model**: The application MUST use a single `asyncio` event
   loop. Textual's built-in worker system (`self.run_worker()`) MUST be
   used for background tasks within the TUI. Manual thread creation is
@@ -215,6 +253,21 @@ User data is sacred. The system MUST NEVER destroy original files.
   original subtitle file, the original MUST be moved to a
   `.anime_studio_trash/` directory (sibling to the source file) with a
   timestamped suffix (e.g., `original.ass.2025-05-17T103000`).
+- **Silent Auto-Cleanup**: The `.anime_studio_trash/` directory MUST be
+  managed by a background task that runs on application startup. This
+  task MUST silently delete all trash files older than 30 days (based on
+  the file's `mtime`). The cleanup MUST:
+  - Run without any user prompt or confirmation dialog — zero user
+    intervention.
+  - Log each deletion at `DEBUG` level (file path + age in days).
+  - Log a summary at `INFO` level (e.g., "Trash cleanup: removed 12
+    files, 340 MB reclaimed").
+  - Never delete files younger than 30 days.
+  - Handle permission errors gracefully (log WARNING, skip file, continue).
+  - Run as an `asyncio` background task via `asyncio.to_thread()` to
+    avoid blocking the event loop.
+  - The 30-day threshold MUST be configurable via `config.toml` field
+    `trash_max_age_days` (default: 30).
 - **Atomic Writes**: Output files (muxed MKVs, repaired ASS files) MUST
   be written to a temporary file first, then atomically renamed to the
   target path. Partial writes MUST NOT leave corrupted files.
@@ -255,13 +308,30 @@ pipeline is MANDATORY for all subtitle ingestion:
 2. **Normalization**: Transcode all detected encodings to UTF-8 with BOM
    stripped. Handle `cp1252`, `UTF-16 LE/BE`, `Shift_JIS`, `EUC-KR`, and
    `ISO-8859-1` explicitly.
-3. **Line Ending Repair**: Normalize to `\r\n` for ASS format
+3. **Arabic Heuristic Fallback**: When `charset_normalizer` detects
+   `cp1252` (Windows-1252), the system MUST apply an additional validation
+   step before accepting the detection:
+   - Decode the raw bytes as `cp1252` and inspect the result.
+   - If the decoded text lacks standard English alphabetic characters
+     (A-Z, a-z comprising <10% of non-whitespace characters) OR contains
+     sequences characteristic of mis-decoded Arabic (e.g., heavy
+     concentration of `Â`, `Ã`, `¡`, `©`, `®`, `±` characters that
+     appear as gibberish), the system MUST re-decode using
+     `Windows-1256` (`cp1256`) instead.
+   - This heuristic specifically protects legacy Arabic fansub files
+     (common in the Middle East anime community) that `charset_normalizer`
+     frequently misidentifies as `cp1252` due to byte-range overlap.
+   - The fallback MUST log at `INFO` level: "Encoding override: cp1252 →
+     cp1256 (Arabic heuristic)" with the file path.
+   - If both `cp1252` and `cp1256` produce gibberish, raise
+     `EncodingRepairError` with both decoded samples for manual review.
+4. **Line Ending Repair**: Normalize to `\r\n` for ASS format
    compatibility (ASS spec mandates Windows line endings).
-4. **Validation**: After transcoding, parse the ASS file with a lenient
+5. **Validation**: After transcoding, parse the ASS file with a lenient
    parser to verify structural integrity (section headers, dialogue line
    counts). Log warnings for recoverable issues; raise
    `EncodingRepairError` for unrecoverable corruption.
-5. **Round-Trip Safety**: The encoding pipeline MUST be idempotent —
+6. **Round-Trip Safety**: The encoding pipeline MUST be idempotent —
    running it on an already-repaired file MUST produce identical output.
 
 ### IX. Observability & Structured Logging
@@ -321,7 +391,9 @@ Tests are NOT optional. The following testing mandate applies:
   contract tests that assert the `HunterProtocol` interface.
 - **Encoding Tests**: The encoding pipeline MUST include tests with real
   sample files in `cp1252`, `UTF-16 LE`, `Shift_JIS`, and `UTF-8 BOM`
-  encodings.
+  encodings. **Arabic fallback tests** MUST include sample files that
+  are Arabic text encoded as `cp1256` but detected as `cp1252` by
+  `charset_normalizer`, verifying the heuristic override triggers.
 - **Framework**: `pytest` with `pytest-asyncio` for async tests. Test
   files MUST mirror source structure under `tests/`.
 - **No Mocking Core Logic**: Core forensic functions MUST NOT be mocked
@@ -468,6 +540,7 @@ code review:
 | Hardcoded `.exe` in binary names     | `shutil.which()` resolution                        |
 | `curses` or direct `rich` usage      | Textual TUI framework exclusively                  |
 | `sys.exit()` in library code         | Raise domain exception; only CLI entry point exits |
+| Hardcoded proxy URLs                 | `config.toml` `proxy` field via `BaseSettings`     |
 
 ## Development Workflow
 
@@ -575,4 +648,4 @@ comments, and verbal agreements.
 - **Guidance File**: For runtime development guidance and quick-reference
   rules, consult `AGENTS.md` at the repository root.
 
-**Version**: 1.4.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-18
+**Version**: 1.5.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-26
