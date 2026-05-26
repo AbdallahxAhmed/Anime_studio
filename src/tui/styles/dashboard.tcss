@@ -1,0 +1,214 @@
+/* Custom dashboard stylesheet for Anime Studio */
+
+Screen {
+    background: $background;
+    color: $text;
+    align: center top;
+}
+
+#main-container {
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+}
+
+#header-panel {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    background: $boost;
+    border: tall $primary;
+    padding: 1 2;
+    align: center middle;
+}
+
+#header-title {
+    color: $primary;
+    text-style: bold;
+    width: 100%;
+    content-align: center middle;
+}
+
+#input-panel {
+    width: 100%;
+    height: auto;
+    background: $boost;
+    padding: 1 2;
+    margin-bottom: 1;
+    border: solid $accent;
+}
+
+#library-path {
+    width: 100%;
+    height: auto;
+    border: tall $background;
+}
+
+#library-path:focus {
+    border: tall $primary;
+}
+
+#controls-panel {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+#dry-run {
+    width: auto;
+    height: auto;
+    margin-right: 4;
+}
+
+#run-pipeline {
+    width: auto;
+    height: auto;
+}
+
+#run-pipeline:hover {
+    background: $primary-darken-1;
+}
+
+/* Execution panels (Progress & Activity) */
+
+#execution-container {
+    width: 100%;
+    height: 1fr;
+    layout: vertical;
+}
+
+#dry-run-banner {
+    width: 100%;
+    height: auto;
+    background: $warning;
+    color: $background;
+    text-style: bold;
+    padding: 0 1;
+    margin-bottom: 1;
+    content-align: center middle;
+}
+
+/* Activity Feed */
+#activity-feed-panel {
+    width: 100%;
+    height: 1fr;
+    border: solid $accent;
+    background: $boost;
+    margin-bottom: 1;
+    padding: 1;
+}
+
+#activity-feed-log {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+}
+
+/* Progress Panel */
+#progress-panel {
+    width: 100%;
+    height: auto;
+    border: solid $success;
+    background: $boost;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+#progress-stage {
+    width: 100%;
+    height: auto;
+    text-style: bold;
+    color: $success;
+}
+
+#progress-bar {
+    width: 100%;
+    height: auto;
+    margin: 1 0;
+}
+
+#progress-detail {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+}
+
+/* Results Panel */
+#results-panel {
+    width: 100%;
+    height: 1fr;
+    border: tall $success;
+    background: $boost;
+    padding: 1 2;
+}
+
+#results-title {
+    width: 100%;
+    height: auto;
+    text-style: bold;
+    color: $success;
+    content-align: center middle;
+    margin-bottom: 1;
+}
+
+#results-table {
+    width: 100%;
+    height: 1fr;
+    border: solid $accent;
+}
+
+#results-summary-info {
+    width: 100%;
+    height: auto;
+    margin: 1 0;
+}
+
+#results-path-label {
+    width: 100%;
+    height: auto;
+    color: $primary;
+    text-style: italic;
+    margin-bottom: 1;
+}
+
+#run-again {
+    width: auto;
+    height: auto;
+    align: center middle;
+}
+
+/* Error Modal */
+#error-modal-container {
+    width: 80%;
+    height: 80%;
+    background: $boost;
+    border: tall $error;
+    align: center middle;
+    padding: 2;
+}
+
+#error-title {
+    color: $error;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#error-message {
+    width: 100%;
+    height: 1fr;
+    margin-bottom: 1;
+}
+
+#error-suggestion {
+    width: 100%;
+    height: auto;
+    color: $warning;
+    margin-bottom: 1;
+}
+
+#dismiss-button {
+    width: auto;
+    height: auto;
+}

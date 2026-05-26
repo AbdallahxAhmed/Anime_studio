@@ -1,12 +1,15 @@
 import asyncio
 import structlog
 import httpx
-from src.hunters.registry import HunterRegistry
+from typing import TYPE_CHECKING
 from src.core.font_cache import FontCache
 from src.config import AppConfig
 from src.models.font import FontQuery, FontAsset
 from src.errors import FontMatchError
 from src.ports.font_hunter import HunterProtocol
+
+if TYPE_CHECKING:
+    from src.hunters.registry import HunterRegistry
 
 logger = structlog.get_logger()
 
@@ -14,7 +17,7 @@ logger = structlog.get_logger()
 class FontResolver:
     """Orchestrator for the 6-layer font resolution chain with circuit breakers and rate limits."""
 
-    def __init__(self, registry: HunterRegistry, cache: FontCache, config: AppConfig):
+    def __init__(self, registry: "HunterRegistry", cache: FontCache, config: AppConfig):
         self.registry = registry
         self.cache = cache
         self.config = config
