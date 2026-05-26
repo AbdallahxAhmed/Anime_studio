@@ -5,6 +5,7 @@ from src.models.trash import TrashReceipt
 from src.models.mux import MuxJob, MuxResult
 from src.models.tool_result import ToolResult
 from src.models.report import EpisodeStatus, EpisodeReport, PipelineReport
+from src.models.pipeline import LibraryScanResult, EpisodeContext, PipelineConfig
 
 __all__ = [
     "SerializablePath",
@@ -22,4 +23,7 @@ __all__ = [
     "EpisodeStatus",
     "EpisodeReport",
     "PipelineReport",
+    "LibraryScanResult",
+    "EpisodeContext",
+    "PipelineConfig",
 ]

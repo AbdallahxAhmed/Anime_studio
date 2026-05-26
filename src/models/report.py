@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.models._types import SerializablePath
 from src.models.subtitle import SyncResult
 from src.models.mux import MuxResult
+from src.models.trash import TrashReceipt
 
 
 class EpisodeStatus(StrEnum):
@@ -23,6 +24,7 @@ class EpisodeReport(BaseModel):
     mux_result: MuxResult | None = None
     missing_fonts: list[str] = Field(default_factory=list)
     applied_rules: list[str] = Field(default_factory=list)
+    trash_receipts: list[TrashReceipt] = Field(default_factory=list)
 
 
 class PipelineReport(BaseModel):

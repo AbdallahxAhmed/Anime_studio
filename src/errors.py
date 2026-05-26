@@ -24,3 +24,7 @@ class HunterError(AnimeStudioError):
 
 class EncodingRepairError(AnimeStudioError):
     """Exception raised when subtitle encoding repair fails or is unrecoverable."""
+
+
+class MuxIntegrityError(AnimeStudioError):
+    """Exception raised when muxing integrity check fails."""
