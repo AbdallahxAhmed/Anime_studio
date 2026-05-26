@@ -1,10 +1,11 @@
-/* Custom dashboard stylesheet for Anime Studio */
+/* Anime Studio Dashboard — Premium Dark Theme */
 
 Screen {
-    background: $background;
+    background: $surface;
     color: $text;
-    align: center top;
 }
+
+/* ── Main Layout ── */
 
 #main-container {
     width: 100%;
@@ -12,40 +13,41 @@ Screen {
     padding: 1 2;
 }
 
+/* ── Header ── */
+
 #header-panel {
     width: 100%;
     height: auto;
-    margin-bottom: 1;
-    background: $boost;
-    border: tall $primary;
+    background: $surface;
     padding: 1 2;
-    align: center middle;
+    margin-bottom: 1;
 }
 
 #header-title {
-    color: $primary;
+    color: $text;
     text-style: bold;
     width: 100%;
     content-align: center middle;
 }
 
+/* ── Input Area ── */
+
 #input-panel {
     width: 100%;
     height: auto;
-    background: $boost;
+    background: $panel;
     padding: 1 2;
     margin-bottom: 1;
-    border: solid $accent;
+    border: round $primary;
 }
 
 #library-path {
     width: 100%;
     height: auto;
-    border: tall $background;
 }
 
 #library-path:focus {
-    border: tall $primary;
+    border: round $primary;
 }
 
 #controls-panel {
@@ -53,7 +55,7 @@ Screen {
     height: auto;
     layout: horizontal;
     align: left middle;
-    margin-bottom: 1;
+    margin-top: 1;
 }
 
 #dry-run {
@@ -67,11 +69,7 @@ Screen {
     height: auto;
 }
 
-#run-pipeline:hover {
-    background: $primary-darken-1;
-}
-
-/* Execution panels (Progress & Activity) */
+/* ── Execution Container ── */
 
 #execution-container {
     width: 100%;
@@ -79,25 +77,30 @@ Screen {
     layout: vertical;
 }
 
+/* ── Dry-Run Banner ── */
+
 #dry-run-banner {
     width: 100%;
     height: auto;
     background: $warning;
-    color: $background;
+    color: $text;
     text-style: bold;
-    padding: 0 1;
+    padding: 0 2;
     margin-bottom: 1;
     content-align: center middle;
+    display: none;
 }
 
-/* Activity Feed */
+/* ── Activity Feed ── */
+
 #activity-feed-panel {
     width: 100%;
     height: 1fr;
-    border: solid $accent;
-    background: $boost;
+    background: $surface;
+    border: round $primary-lighten-2;
     margin-bottom: 1;
     padding: 1;
+    display: none;
 }
 
 #activity-feed-log {
@@ -106,21 +109,23 @@ Screen {
     background: transparent;
 }
 
-/* Progress Panel */
+/* ── Progress Panel ── */
+
 #progress-panel {
     width: 100%;
     height: auto;
-    border: solid $success;
-    background: $boost;
+    background: $panel;
+    border: round $primary;
     padding: 1 2;
     margin-bottom: 1;
+    display: none;
 }
 
 #progress-stage {
     width: 100%;
     height: auto;
     text-style: bold;
-    color: $success;
+    color: $text;
 }
 
 #progress-bar {
@@ -135,13 +140,15 @@ Screen {
     color: $text-muted;
 }
 
-/* Results Panel */
+/* ── Results Panel ── */
+
 #results-panel {
     width: 100%;
     height: 1fr;
-    border: tall $success;
-    background: $boost;
+    background: $panel;
+    border: round $success;
     padding: 1 2;
+    display: none;
 }
 
 #results-title {
@@ -156,7 +163,6 @@ Screen {
 #results-table {
     width: 100%;
     height: 1fr;
-    border: solid $accent;
 }
 
 #results-summary-info {
@@ -176,17 +182,20 @@ Screen {
 #run-again {
     width: auto;
     height: auto;
+}
+
+/* ── Error Modal ── */
+
+ErrorModal {
     align: center middle;
 }
 
-/* Error Modal */
 #error-modal-container {
-    width: 80%;
-    height: 80%;
-    background: $boost;
-    border: tall $error;
-    align: center middle;
-    padding: 2;
+    width: 60%;
+    max-height: 80%;
+    background: $panel;
+    border: round $error;
+    padding: 2 3;
 }
 
 #error-title {
@@ -197,7 +206,7 @@ Screen {
 
 #error-message {
     width: 100%;
-    height: 1fr;
+    height: auto;
     margin-bottom: 1;
 }
 
