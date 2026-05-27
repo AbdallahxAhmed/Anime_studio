@@ -50,7 +50,7 @@ auto_commit:
     message: "[Spec Kit] Add tasks"
   after_implement:
     enabled: true
-    message: "[Spec Kit] Phase 4: Implement Auto-Discovery & Font Ingestion Service"
+    message: "[Spec Kit] Phase 5-8: Complete GUI integration, feedback logs, and type polish"
   after_checklist:
     enabled: false
     message: "[Spec Kit] Add checklist"

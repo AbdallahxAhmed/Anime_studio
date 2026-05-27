@@ -99,3 +99,21 @@ async def test_ingest_directories_non_existent(mock_cache, semaphore):
     assert result.skipped_count == 0
     assert result.failed_count == 0
     assert len(result.failed_details) == 0
+
+
+@pytest.mark.anyio
+async def test_font_ingestion_structlog_event(mock_cache, semaphore):
+    service = FontIngestionService(mock_cache, semaphore)
+
+    with patch("src.core.font_ingestion.logger") as mock_logger:
+        result = await service.ingest_files(
+            [Path("tests/fixtures/fonts/valid.ttf")], source="manual_import"
+        )
+
+        mock_logger.info.assert_called_with(
+            "font_ingestion_complete",
+            success_count=result.success_count,
+            skipped_count=result.skipped_count,
+            failed_count=result.failed_count,
+            source="manual_import",
+        )

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import pytest
+import asyncio
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
@@ -46,11 +47,13 @@ async def test_main_window_successful_run(mocker, tmp_path: Path) -> None:
 
     log_bridge = MockLogBridge()
     config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
 
     window = MainWindow(
         pipeline_runner=mock_runner,
         log_bridge=log_bridge,
         config=config,
+        font_ingestion_service=mock_ingestion,
     )
 
     window.library_picker.set_path(tmp_path)
@@ -80,6 +83,7 @@ async def test_main_window_failed_run(mocker, tmp_path: Path) -> None:
 
     log_bridge = MockLogBridge()
     config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
 
     # Mock show_error_dialog to avoid showing blocking QMessageBox dialog in unit tests
     mock_dialog = mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
@@ -88,6 +92,7 @@ async def test_main_window_failed_run(mocker, tmp_path: Path) -> None:
         pipeline_runner=mock_runner,
         log_bridge=log_bridge,
         config=config,
+        font_ingestion_service=mock_ingestion,
     )
 
     window.library_picker.set_path(tmp_path)
@@ -103,3 +108,123 @@ async def test_main_window_failed_run(mocker, tmp_path: Path) -> None:
     assert window.run_button.isEnabled() is True
     assert window.library_picker.isEnabled() is True
     assert window._pipeline_running is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_import_button_and_dialog_trigger(
+    mocker, tmp_path: Path
+) -> None:
+    mock_runner = mocker.MagicMock()
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_ingestion.ingest_directories = mocker.AsyncMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+    )
+
+    # Assert Import button exists
+    assert window.import_button is not None
+    assert window.import_button.text() == "Import Fonts"
+
+    # Mock QFileDialog.getExistingDirectory
+    mocker.patch(
+        "PySide6.QtWidgets.QFileDialog.getExistingDirectory",
+        return_value=str(tmp_path),
+    )
+
+    await window._on_import_fonts_click()
+
+    # Verify that FontIngestionService.ingest_directories was called recursively
+    mock_ingestion.ingest_directories.assert_called_once_with(
+        [Path(tmp_path)], source="manual_import"
+    )
+
+
+def test_main_window_drag_enter_event_valid(mocker, tmp_path: Path) -> None:
+    mock_runner = mocker.MagicMock()
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+    )
+
+    # Mock QDragEnterEvent
+    event = mocker.MagicMock()
+    url = mocker.MagicMock()
+    url.toLocalFile.return_value = "tests/fixtures/fonts/valid.ttf"
+    event.mimeData().hasUrls.return_value = True
+    event.mimeData().urls.return_value = [url]
+
+    window.dragEnterEvent(event)
+
+    event.acceptProposedAction.assert_called_once()
+    assert "border: 3px solid" in window.styleSheet()
+
+
+def test_main_window_drag_enter_event_invalid(mocker, tmp_path: Path) -> None:
+    mock_runner = mocker.MagicMock()
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+    )
+
+    # Mock QDragEnterEvent with invalid file type
+    event = mocker.MagicMock()
+    url = mocker.MagicMock()
+    url.toLocalFile.return_value = "some_notes.txt"
+    event.mimeData().hasUrls.return_value = True
+    event.mimeData().urls.return_value = [url]
+
+    window.dragEnterEvent(event)
+
+    event.ignore.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_main_window_drop_event_dispatch(mocker, tmp_path: Path) -> None:
+    mock_runner = mocker.MagicMock()
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_ingestion.ingest_files = mocker.AsyncMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+    )
+
+    # Mock QDropEvent
+    event = mocker.MagicMock()
+    url = mocker.MagicMock()
+    url.toLocalFile.return_value = "tests/fixtures/fonts/valid.ttf"
+    event.mimeData().urls.return_value = [url]
+
+    # Directly execute drop event
+    window.dropEvent(event)
+
+    event.acceptProposedAction.assert_called_once()
+
+    # Yield control to let asyncio.ensure_future task execute
+    await asyncio.sleep(0.05)
+
+    mock_ingestion.ingest_files.assert_called_once_with(
+        [Path("tests/fixtures/fonts/valid.ttf")], source="drag_drop"
+    )

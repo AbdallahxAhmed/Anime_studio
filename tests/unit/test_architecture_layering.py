@@ -39,3 +39,45 @@ def test_hexagonal_architecture_layering():
                         if node.level > 0:
                             # Relative imports are allowed within the package, but let's make sure they don't break boundaries.
                             pass
+
+
+def test_font_ingestion_and_hunter_boundary_rules():
+    src_dir = Path(__file__).parent.parent.parent / "src"
+
+    # 1. Check system_font_hunter.py
+    hunter_file = src_dir / "hunters" / "system_font_hunter.py"
+    if hunter_file.is_file():
+        with open(hunter_file, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert "gui" not in alias.name, "SystemFontHunter imports from gui!"
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    assert "gui" not in node.module, (
+                        "SystemFontHunter imports from gui!"
+                    )
+
+    # 2. Check font_ingestion.py
+    ingestion_file = src_dir / "core" / "font_ingestion.py"
+    if ingestion_file.is_file():
+        with open(ingestion_file, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert "gui" not in alias.name, (
+                        "FontIngestionService imports from gui!"
+                    )
+                    assert "PySide" not in alias.name, (
+                        "FontIngestionService imports from PySide!"
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    assert "gui" not in node.module, (
+                        "FontIngestionService imports from gui!"
+                    )
+                    assert "PySide" not in node.module, (
+                        "FontIngestionService imports from PySide!"
+                    )

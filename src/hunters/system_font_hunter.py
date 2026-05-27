@@ -2,7 +2,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
-from fontTools.ttLib import TTFont
+from fontTools.ttLib import TTFont  # type: ignore[import-untyped]
 import structlog
 
 from src.models.font import FontQuery, FontAsset, HunterResult, FontPayload
@@ -78,7 +78,7 @@ class SystemFontHunter:
     circuit_breaker_threshold: int = 3
     ping_url: str | None = None
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._index: dict[str, tuple[Path, str, dict[int, str]]] = {}
         self._index_built: bool = False
 

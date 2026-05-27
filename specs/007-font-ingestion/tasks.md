@@ -95,10 +95,10 @@
 
 ### Implementation for User Story 3
 
-- [ ] T022 [US3] Modify `bootstrap_app()` in src/gui/bootstrap.py: create shared `asyncio.Semaphore(config.max_concurrent_disk_io)`, instantiate `FontIngestionService(cache, disk_semaphore)`, pass both `font_ingestion_service` and `disk_semaphore` to `PipelineRunner`, pass `font_ingestion_service` to `MainWindow`
-- [ ] T023 [US3] Modify `MainWindow.__init__()` in src/gui/main_window.py: accept `font_ingestion_service` parameter, add `QPushButton("Import Fonts")` in left panel config group (between `LibraryPickerWidget` and "Run Pipeline" button), connect button `clicked` signal to `_on_import_fonts_click`
-- [ ] T024 [US3] Implement `_on_import_fonts_click()` as `@asyncSlot()` in src/gui/main_window.py: open `QFileDialog.getExistingDirectory()`, on selection call `await self.font_ingestion_service.ingest_directories([Path(folder)], source="manual_import")`, result emitted via structlog → SignalBridge → ActivityFeedWidget
-- [ ] T025 [US3] Add unit test for Import Fonts button presence and dialog trigger in tests/unit/gui/test_main_window.py
+- [x] T022 [US3] Modify `bootstrap_app()` in src/gui/bootstrap.py: create shared `asyncio.Semaphore(config.max_concurrent_disk_io)`, instantiate `FontIngestionService(cache, disk_semaphore)`, pass both `font_ingestion_service` and `disk_semaphore` to `PipelineRunner`, pass `font_ingestion_service` to `MainWindow`
+- [x] T023 [US3] Modify `MainWindow.__init__()` in src/gui/main_window.py: accept `font_ingestion_service` parameter, add `QPushButton("Import Fonts")` in left panel config group (between `LibraryPickerWidget` and "Run Pipeline" button), connect button `clicked` signal to `_on_import_fonts_click`
+- [x] T024 [US3] Implement `_on_import_fonts_click()` as `@asyncSlot()` in src/gui/main_window.py: open `QFileDialog.getExistingDirectory()`, on selection call `await self.font_ingestion_service.ingest_directories([Path(folder)], source="manual_import")`, result emitted via structlog → SignalBridge → ActivityFeedWidget
+- [x] T025 [US3] Add unit test for Import Fonts button presence and dialog trigger in tests/unit/gui/test_main_window.py
 
 **Checkpoint**: Manual import button visible, QFileDialog opens, ingestion runs async, Activity Feed shows results.
 
@@ -112,10 +112,10 @@
 
 ### Implementation for User Story 4
 
-- [ ] T026 [US4] Implement drag-and-drop on `MainWindow` in src/gui/main_window.py: call `self.setAcceptDrops(True)` in `__init__`, store `self._default_style = self.styleSheet()`, override `dragEnterEvent()` to validate MIME URLs (folders or .ttf/.otf), set green border stylesheet on valid drag, override `dragLeaveEvent()` to reset style, override `dropEvent()` to reset style and dispatch to async handler
-- [ ] T027 [US4] Implement `_handle_font_drop()` async method in src/gui/main_window.py: separate paths into dirs and files, call `ingest_directories()` for dirs and `ingest_files()` for individual font files, result flows through structlog
-- [ ] T028 [US4] Implement `_is_valid_font_drop(url)` helper in src/gui/main_window.py: check `url.toLocalFile()` — accept if directory or if extension in `.ttf`/`.otf` (case-insensitive)
-- [ ] T029 [US4] Add unit tests for drag-drop validation and event handling in tests/unit/gui/test_main_window.py: test dragEnterEvent accepts valid drops, rejects invalid, test dropEvent dispatches correctly
+- [x] T026 [US4] Implement drag-and-drop on `MainWindow` in src/gui/main_window.py: call `self.setAcceptDrops(True)` in `__init__`, store `self._default_style = self.styleSheet()`, override `dragEnterEvent()` to validate MIME URLs (folders or .ttf/.otf), set green border stylesheet on valid drag, override `dragLeaveEvent()` to reset style, override `dropEvent()` to reset style and dispatch to async handler
+- [x] T027 [US4] Implement `_handle_font_drop()` async method in src/gui/main_window.py: separate paths into dirs and files, call `ingest_directories()` for dirs and `ingest_files()` for individual font files, result flows through structlog
+- [x] T028 [US4] Implement `_is_valid_font_drop(url)` helper in src/gui/main_window.py: check `url.toLocalFile()` — accept if directory or if extension in `.ttf`/`.otf` (case-insensitive)
+- [x] T029 [US4] Add unit tests for drag-drop validation and event handling in tests/unit/gui/test_main_window.py: test dragEnterEvent accepts valid drops, rejects invalid, test dropEvent dispatches correctly
 
 **Checkpoint**: Drag folder → green border → drop → ingestion → Activity Feed result. Drag .txt → rejected.
 
@@ -131,9 +131,9 @@
 
 ### Implementation for User Story 5
 
-- [ ] T030 [US5] Verify structlog event `font_ingestion_complete` in `FontIngestionService` includes fields: `event`, `success_count`, `skipped_count`, `failed_count`, `source` — add/adjust if needed in src/core/font_ingestion.py
-- [ ] T031 [US5] Verify `ActivityFeedWidget.add_entry()` correctly formats ingestion events in src/gui/widgets/activity_feed.py — the existing handler should display the structured log event, but verify the `font_ingestion_complete` event renders a human-readable message (e.g., "Font ingestion complete: 15 new, 3 skipped, 2 failed")
-- [ ] T032 [US5] Add integration-style unit test in tests/unit/core/test_font_ingestion.py: verify structlog captures the `font_ingestion_complete` event with correct field values after ingestion
+- [x] T030 [US5] Verify structlog event `font_ingestion_complete` in `FontIngestionService` includes fields: `event`, `success_count`, `skipped_count`, `failed_count`, `source` — add/adjust if needed in src/core/font_ingestion.py
+- [x] T031 [US5] Verify `ActivityFeedWidget.add_entry()` correctly formats ingestion events in src/gui/widgets/activity_feed.py — the existing handler should display the structured log event, but verify the `font_ingestion_complete` event renders a human-readable message (e.g., "Font ingestion complete: 15 new, 3 skipped, 2 failed")
+- [x] T032 [US5] Add integration-style unit test in tests/unit/core/test_font_ingestion.py: verify structlog captures the `font_ingestion_complete` event with correct field values after ingestion
 
 **Checkpoint**: End-to-end feedback verified for all three triggers.
 
@@ -143,12 +143,12 @@
 
 **Purpose**: Architecture validation, cleanup, and final checks
 
-- [ ] T033 [P] Update architecture boundary test in tests/unit/test_architecture_layering.py: verify `src/hunters/system_font_hunter.py` does not import from `src/gui/`, verify `src/core/font_ingestion.py` does not import from `src/gui/` or `PySide6`
-- [ ] T034 [P] Run `ruff check src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py` — zero warnings
-- [ ] T035 [P] Run `ruff format --check src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py` — no formatting changes needed
-- [ ] T036 Run full test suite: `pytest tests/unit/ tests/contract/` — all pass, no regressions
-- [ ] T037 Run quickstart.md smoke tests (manual validation of scenarios 1-11)
-- [ ] T038 Verify `mypy src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py --strict` — zero errors
+- [x] T033 [P] Update architecture boundary test in tests/unit/test_architecture_layering.py: verify `src/hunters/system_font_hunter.py` does not import from `src/gui/`, verify `src/core/font_ingestion.py` does not import from `src/gui/` or `PySide6`
+- [x] T034 [P] Run `ruff check src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py` — zero warnings
+- [x] T035 [P] Run `ruff format --check src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py` — no formatting changes needed
+- [x] T036 Run full test suite: `pytest tests/unit/ tests/contract/` — all pass, no regressions
+- [x] T037 Run quickstart.md smoke tests (manual validation of scenarios 1-11)
+- [x] T038 Verify mypy `src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py --strict` — zero errors
 
 ---
 

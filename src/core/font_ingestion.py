@@ -1,7 +1,7 @@
 import asyncio
 from io import BytesIO
 from pathlib import Path
-from fontTools.ttLib import TTFont
+from fontTools.ttLib import TTFont  # type: ignore[import-untyped]
 import structlog
 
 from src.models.font import FontPayload
@@ -78,7 +78,7 @@ class FontIngestionService:
         success_count = 0
         skipped_count = 0
         failed_count = 0
-        failed_details = []
+        failed_details: list[tuple[Path, str]] = []
 
         unique_files = list(dict.fromkeys(files))
 
@@ -122,7 +122,7 @@ class FontIngestionService:
                 skipped_count += 1
             else:
                 failed_count += 1
-                failed_details.append((f, error_reason))
+                failed_details.append((f, error_reason or "Unknown error"))
                 logger.warning(
                     "Font ingestion failed for file",
                     path=str(f),

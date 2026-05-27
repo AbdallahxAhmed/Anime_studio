@@ -121,6 +121,16 @@ def bootstrap_app(app: QApplication) -> Any:
         config=config,
     )
 
+    import asyncio
+
+    disk_semaphore = asyncio.Semaphore(config.max_concurrent_disk_io)
+
+    core_ingestion = importlib.import_module("src.core.font_ingestion")
+    FontIngestionService = core_ingestion.FontIngestionService
+    font_ingestion_service = FontIngestionService(
+        cache=font_cache, disk_semaphore=disk_semaphore
+    )
+
     core_runner = importlib.import_module("src.core.pipeline_runner")
     PipelineRunner = core_runner.PipelineRunner
     pipeline_runner = PipelineRunner(
@@ -129,6 +139,8 @@ def bootstrap_app(app: QApplication) -> Any:
         filesystem=filesystem_adapter,
         tool_registry=tool_registry,
         config=config,
+        font_ingestion_service=font_ingestion_service,
+        disk_semaphore=disk_semaphore,
     )
 
     # 4. Create log bridge
@@ -156,6 +168,7 @@ def bootstrap_app(app: QApplication) -> Any:
         pipeline_runner=pipeline_runner,
         log_bridge=log_bridge,
         config=config,
+        font_ingestion_service=font_ingestion_service,
     )
 
     # 6. Pre-populate library path if previously configured

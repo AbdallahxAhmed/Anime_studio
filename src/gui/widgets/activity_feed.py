@@ -60,6 +60,15 @@ class ActivityFeedWidget(QWidget):
         """
         level = str(log_entry.get("level", "info")).lower()
         message = log_entry.get("event", "")
+
+        if message == "font_ingestion_complete":
+            success = log_entry.get("success_count", 0)
+            skipped = log_entry.get("skipped_count", 0)
+            failed = log_entry.get("failed_count", 0)
+            source = log_entry.get("source", "unknown")
+            source_display = source.replace("_", " ").title()
+            message = f"Font ingestion complete ({source_display}): {success} new, {skipped} skipped, {failed} failed"
+
         timestamp = log_entry.get("timestamp", "")
 
         # Format ISO timestamp to hh:mm:ss if possible

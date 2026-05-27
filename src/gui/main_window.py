@@ -36,11 +36,13 @@ class MainWindow(QMainWindow):
         pipeline_runner: Any,
         log_bridge: Any,
         config: Any,
+        font_ingestion_service: Any,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.pipeline_runner = pipeline_runner
         self.config = config
+        self.font_ingestion_service = font_ingestion_service
         self._pipeline_running = False
 
         # Initialize SignalBridge
@@ -75,6 +77,9 @@ class MainWindow(QMainWindow):
 
         self.library_picker = LibraryPickerWidget(config_group)
         config_layout.addWidget(self.library_picker)
+
+        self.import_button = QPushButton("Import Fonts", config_group)
+        config_layout.addWidget(self.import_button)
 
         self.run_button = QPushButton("Run Pipeline", config_group)
         self.run_button.setEnabled(False)
@@ -115,8 +120,15 @@ class MainWindow(QMainWindow):
         # Wire library picker selection event to path handler
         self.library_picker.library_selected.connect(self._on_library_selected)
 
+        # Wire import button click
+        self.import_button.clicked.connect(self._on_import_fonts_click)
+
         # Wire run button click
         self.run_button.clicked.connect(self._on_run_click)
+
+        # Setup Drag & Drop
+        self.setAcceptDrops(True)
+        self._default_style = self.styleSheet()
 
         logger.info("MainWindow initialized and signal bridge wired")
 
@@ -266,3 +278,67 @@ class MainWindow(QMainWindow):
         else:
             logger.info("Application closing gracefully")
             event.accept()
+
+    @asyncSlot()
+    async def _on_import_fonts_click(self) -> None:
+        """Handle 'Import Fonts' button click to let users manually select a folder to import."""
+        from PySide6.QtWidgets import QFileDialog
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Font Folder to Import",
+            "",
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if folder:
+            logger.info(f"User initiated manual font import from folder: {folder}")
+            await self.font_ingestion_service.ingest_directories(
+                [Path(folder)], source="manual_import"
+            )
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if any(self._is_valid_font_drop(url) for url in urls):
+                event.acceptProposedAction()
+                self.setStyleSheet("QMainWindow { border: 3px solid #4CAF50; }")
+                return
+        event.ignore()
+
+    def dragLeaveEvent(self, event: Any) -> None:
+        self.setStyleSheet(self._default_style)
+
+    def dropEvent(self, event: Any) -> None:
+        self.setStyleSheet(self._default_style)
+        urls = event.mimeData().urls()
+        paths = [Path(url.toLocalFile()) for url in urls]
+        import asyncio
+
+        asyncio.ensure_future(self._handle_font_drop(paths))
+        event.acceptProposedAction()
+
+    def _is_valid_font_drop(self, url: Any) -> bool:
+        """Helper to validate if a dropped URL is a directory or font file."""
+        local_file = url.toLocalFile()
+        if not local_file:
+            return False
+        p = Path(local_file)
+        if p.is_dir():
+            return True
+        return p.suffix.lower() in (".ttf", ".otf")
+
+    async def _handle_font_drop(self, paths: list[Path]) -> None:
+        """Handles font drop async by separating into dirs and files and importing."""
+        dirs = [p for p in paths if p.is_dir()]
+        files = [
+            p for p in paths if p.is_file() and p.suffix.lower() in (".ttf", ".otf")
+        ]
+
+        if dirs:
+            logger.info("Drag and drop: Ingesting directories", directories=dirs)
+            await self.font_ingestion_service.ingest_directories(
+                dirs, source="drag_drop"
+            )
+        if files:
+            logger.info("Drag and drop: Ingesting files", files=files)
+            await self.font_ingestion_service.ingest_files(files, source="drag_drop")
