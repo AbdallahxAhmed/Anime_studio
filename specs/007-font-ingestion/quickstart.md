@@ -1,114 +1,63 @@
-# Quickstart: Font Ingestion System
+# Quickstart: Hotfix — Core Stability & Hunter Resolution (v1.7.0)
 
-**Feature**: 007-font-ingestion
-**Date**: 2026-05-27
+## What Changed
 
-## Prerequisites
+This hotfix resolves three critical pipeline failures:
 
-```bash
-# From project root — fonttools is already an approved dependency
-uv pip install fonttools
-# PySide6, qasync, qdarktheme should already be installed from 006-pyside-dashboard
+### 1. Scanner No Longer Processes Trash Directories
+The library scanner now excludes all dot-prefixed directories (`.anime_studio_trash`, `.git`, etc.) from its recursive scan. MKV files previously moved to trash are no longer rediscovered as valid episodes.
+
+### 2. Tool Discovery Now Logs Every Step
+When `alass` or another tool isn't found, the DEBUG log now shows every path that was checked. This makes it trivial to diagnose "tool not found" issues:
+
+```
+DEBUG: Discovery step 1: checking scoop shim | tool=alass | path=C:\Users\you\scoop\shims\alass.exe | exists=False
+DEBUG: Discovery step 2: checking scoop app dir | tool=alass | path=C:\Users\you\scoop\apps\alass\current | exists=False
+DEBUG: Discovery step 3: checking mpv directory | tool=alass | path=C:\Program Files\mpv\alass.exe | exists=False
+DEBUG: Discovery step 4: checking Program Files | tool=alass | path=C:\Program Files\alass | exists=False
+DEBUG: Discovery step 5: checking shutil.which | tool=alass | result=None
+WARNING: optional dependency missing | name=alass
 ```
 
-## Smoke Test Scenarios
+### 3. Font Resolution Actually Works Now
 
-### 1. System Font Resolution (via Pipeline)
+**System fonts**: The `SystemFontHunter` now:
+- Scans `.ttc` files (TrueType Collections), not just `.ttf`/`.otf`
+- Applies progressive normalization when exact match fails (strips "Regular"/"Normal" suffixes, expands weight synonyms like "Semibold" ↔ "Demi Bold")
 
-1. Ensure an ASS subtitle file references "Arial" (present on every Windows install)
-2. Run the pipeline on a library containing that subtitle
-3. ✅ Activity feed shows font resolved via `source="system"`
-4. ✅ No network requests made for "Arial"
-5. ✅ Font cache does NOT contain a copy of `arial.ttf` (resolve-in-place)
-6. ✅ `mkvmerge` receives the absolute path `C:\Windows\Fonts\arial.ttf`
+**Network fonts**: A new `NetworkFontHunter` (Google Fonts API) provides network-based resolution for fonts not found locally. Requires adding `google_fonts_api_key` to your `config.toml`.
 
-### 2. System Font — Not Found Fallback
+**Proxy support**: `startup_ping()` now correctly uses the `proxy` setting from `config.toml`. Users behind SOCKS/HTTP proxies no longer get all network hunters disabled at startup.
 
-1. Ensure an ASS subtitle references "FansubCustomFont9000" (not a system font)
-2. Run the pipeline
-3. ✅ SystemFontHunter returns no results
-4. ✅ Resolution falls through to next hunter in priority order
-5. ✅ No error, no circuit breaker trip
+**Softer circuit breaker**: A failed startup ping now records 1 failure (not 3), giving the hunter a fair chance during actual resolution instead of being immediately disabled.
 
-### 3. Auto-Discovery from Anime Library
+## Configuration
 
-1. Create directory structure:
-   ```
-   D:\TestAnime\ShowX\
-   ├── Episode01.mkv
-   ├── Episode01.ass
-   └── Fonts\
-       ├── CustomFont.ttf
-       └── AnotherFont.otf
-   ```
-2. Set `D:\TestAnime\ShowX\` as library path
-3. Click "Run Pipeline"
-4. ✅ Activity feed shows "Font ingestion complete: 2 new fonts imported" BEFORE episode analysis starts
-5. ✅ Both fonts appear in `font_cache/` with TOML index entries
-6. ✅ If "CustomFont" is referenced in the ASS, it resolves from cache (layer 1) during analysis
+### New config.toml field
 
-### 4. Auto-Discovery Deduplication
+```toml
+# Optional: enables Google Fonts API-based font resolution
+google_fonts_api_key = "your-api-key-here"
+```
 
-1. Using the same library from test 3, run the pipeline again
-2. ✅ Activity feed shows "Font ingestion: 0 new, 2 skipped (already cached)"
-3. ✅ No duplicate entries in TOML index
+When absent, the network font hunter silently deactivates — no errors, no crashes.
 
-### 5. Manual Import via Button
+### Existing proxy field (now actually works)
 
-1. Launch the application
-2. ✅ "Import Fonts" button visible near library picker
-3. Click "Import Fonts"
-4. ✅ Native folder selection dialog opens
-5. Select a folder containing 3 `.ttf` files (2 new, 1 already cached)
-6. ✅ Activity feed shows "Font ingestion complete: 2 new, 1 skipped (already cached)"
-7. ✅ UI remains responsive during import (no freeze)
+```toml
+# Optional: proxy for all network requests including startup pings
+proxy = "socks5://127.0.0.1:1080"
+```
 
-### 6. Manual Import — Cancel
+## Verification
 
-1. Click "Import Fonts"
-2. Click "Cancel" in the folder dialog
-3. ✅ No error, no activity feed entry, no crash
+```bash
+# Run the full test suite
+pytest tests/ -v
 
-### 7. Drag & Drop — Folder
-
-1. Open file explorer alongside the application
-2. Drag a folder containing `.ttf` files over the main window
-3. ✅ Green border highlight appears
-4. Drop the folder
-5. ✅ Border highlight disappears
-6. ✅ Activity feed shows ingestion result
-7. ✅ Fonts appear in cache
-
-### 8. Drag & Drop — Individual Files
-
-1. Drag individual `.ttf` files from file explorer onto the window
-2. ✅ Green border highlight appears
-3. Drop files
-4. ✅ Ingestion runs, results shown in activity feed
-
-### 9. Drag & Drop — Invalid Content
-
-1. Drag a `.txt` file over the window
-2. ✅ No green border highlight (drop rejected)
-3. Drag a `.jpg` file over the window
-4. ✅ No green border highlight (drop rejected)
-5. Attempt to drop
-6. ✅ Nothing happens
-
-### 10. Corrupt Font Handling
-
-1. Create a 0-byte file named `corrupt.ttf`
-2. Include it in a folder with valid fonts
-3. Import via button or drag-drop
-4. ✅ Activity feed shows "N new, M skipped, 1 failed"
-5. ✅ Application does NOT crash
-6. ✅ Valid fonts still imported successfully
-7. ✅ Log file contains WARNING with the corrupt file path and error
-
-### 11. Concurrent Import During Pipeline
-
-1. Start a pipeline run
-2. While pipeline is running, click "Import Fonts" and select a folder
-3. ✅ Both operations run concurrently
-4. ✅ Total disk I/O is bounded by shared semaphore
-5. ✅ Both complete successfully
+# Run only the hotfix-related tests
+pytest tests/unit/core/test_library_scanner.py -v
+pytest tests/unit/adapters/test_dependency_checker.py -v
+pytest tests/unit/hunters/ -v
+pytest tests/unit/core/test_font_resolver.py -v
+```

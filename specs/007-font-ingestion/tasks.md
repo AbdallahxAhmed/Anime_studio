@@ -1,154 +1,195 @@
-# Tasks: Font Ingestion System
+# Tasks: Hotfix — Core Stability & Hunter Resolution (v1.7.0)
 
-**Input**: Design documents from `/specs/007-font-ingestion/`
+**Input**: Design documents from `specs/007-font-ingestion/`
 
-**Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
+**Prerequisites**: plan.md ✅, spec.md ✅, research.md ✅, data-model.md ✅, quickstart.md ✅
 
-**Tests**: Included — spec references pytest and constitution mandates 85% core coverage.
+**Tests**: Included — spec.md mandates test-first discipline (Constitution X) and the plan's verification section specifies unit, contract, and integration tests.
 
-**Organization**: Tasks follow strict inner-to-outer dependency layers: Domain Models → Core Services & Hunters → Core Integrations → Presentation Layer.
+**Organization**: Tasks are grouped by bug cluster (mapped to user stories from spec). Each cluster is independently fixable and testable.
 
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: Can run in parallel (different files, no dependencies)
-- **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
+- **[Story]**: Which user story this task belongs to (US1=Scanner, US2=ToolDiscovery, US3=SystemFontHunter, US4=NetworkFontHunter, US5=StartupPing)
 - Include exact file paths in descriptions
+
+## Story Mapping
+
+| Story | Hotfix Component | Spec User Stories Affected | Priority |
+|-------|-----------------|---------------------------|----------|
+| US1 | Scanner Trash Exclusion | US2 (Auto-Discovery), US5 (Feedback) | P0 (blocker) |
+| US2 | Tool Discovery Logging | All (pipeline prerequisite) | P1 |
+| US3 | SystemFontHunter Normalization + TTC | US1 (System Font Resolution) | P0 (blocker) |
+| US4 | NetworkFontHunter Creation | US1 (System Font Resolution fallback) | P1 |
+| US5 | Startup Ping Proxy + Circuit Breaker | US1 (System Font Resolution), US4 (Network) | P0 (blocker) |
 
 ---
 
 ## Phase 1: Setup
 
-**Purpose**: Test fixtures and shared infrastructure needed by all phases
+**Purpose**: No new project setup needed — all files exist. Verify baseline.
 
-- [x] T001 Create sample font test fixtures in tests/fixtures/fonts/ (at minimum: one valid .ttf, one valid .otf, one corrupt/zero-byte .ttf)
-- [x] T002 [P] Verify fonttools is available in dev environment by running `uv pip show fonttools`
+- [ ] T001 Run existing test suite to establish baseline with `pytest tests/ -v --tb=short`
+- [ ] T002 Verify current scanner behavior by reviewing `src/core/library_scanner.py` scan output with a library containing `.anime_studio_trash/`
 
----
-
-## Phase 2: Foundational — Domain Models (Inner Layer)
-
-**Purpose**: Pure data models with zero I/O. MUST complete before core services or hunters.
-
-**⚠️ CRITICAL**: All core services, hunters, and GUI code depend on these model changes.
-
-- [x] T003 [P] Add `is_cacheable: bool = True` field to `FontAsset` model in src/models/font.py
-- [x] T004 [P] Create `FontIngestionResult` frozen Pydantic model in src/models/ingestion.py with fields: `success_count: int`, `skipped_count: int`, `failed_count: int`, `failed_details: list[tuple[SerializablePath, str]]`, `source: str`
-- [x] T005 [P] Add `LibraryScanOutput` frozen Pydantic model to src/models/pipeline.py with fields: `episodes: list[LibraryScanResult]`, `font_directories: list[SerializablePath] = Field(default_factory=list)`
-- [x] T006 [P] Add unit tests for `is_cacheable` field default and serialization in tests/unit/models/test_font.py
-- [x] T007 [P] Add unit tests for `FontIngestionResult` construction and frozen enforcement in tests/unit/models/test_ingestion.py
-- [x] T008 [P] Add unit tests for `LibraryScanOutput` construction in tests/unit/models/test_pipeline_models.py
-
-**Checkpoint**: `pytest tests/unit/models/test_font.py tests/unit/models/test_ingestion.py tests/unit/models/test_pipeline_models.py` — all pass. Models frozen, serializable, no I/O.
+**Checkpoint**: Baseline established — all existing tests pass, bug behaviors confirmed.
 
 ---
 
-## Phase 3: User Story 1 — System Font Resolution (Priority: P1) 🎯 MVP
+## Phase 2: Foundational (Blocking Prerequisites)
 
-**Goal**: Fonts installed on the user's OS are automatically discovered and resolved in-place via `SystemFontHunter` (HunterProtocol, priority 4), without network or cache copy.
+**Purpose**: Configuration extension needed before US4 (NetworkFontHunter) can be implemented.
 
-**Independent Test**: Create a mock ASS referencing "Arial", run `FontResolver.resolve()`, verify SystemFontHunter returns `FontAsset(is_cacheable=False, source="system")` with absolute path.
+**⚠️ CRITICAL**: T003 must complete before Phase 6 (US4) can begin.
+
+- [ ] T003 Add `google_fonts_api_key: str | None = None` field to `AppConfig` in `src/config.py`
+- [ ] T004 [P] Add unit test for new config field in `tests/unit/test_config.py` — verify default is `None`, verify TOML round-trip with key present and absent
+
+**Checkpoint**: Config extended — NetworkFontHunter can be wired up in Phase 6.
+
+---
+
+## Phase 3: User Story 1 — Scanner Trash Exclusion (Priority: P0) 🎯 MVP
+
+**Goal**: Prevent `library_scanner.scan_library()` from recursively processing `.anime_studio_trash/`, `.git/`, and any dot-prefixed directory.
+
+**Independent Test**: Create temp dir with `library/show/.anime_studio_trash/ep01.mkv`, `library/show/ep01.mkv`, and `library/.git/config.mkv`. Run `scan_library()` on `library/`. Assert only `library/show/ep01.mkv` appears in results. Assert `.anime_studio_trash` and `.git` contents are excluded.
 
 ### Tests for User Story 1
 
-- [x] T009 [P] [US1] Add contract test verifying `SystemFontHunter` conforms to `HunterProtocol` (runtime_checkable) in tests/contract/test_hunter_protocol.py
-- [x] T010 [P] [US1] Create unit tests for `SystemFontHunter` in tests/unit/hunters/test_system_font_hunter.py: test `_get_system_font_dirs()` per OS, test `_extract_font_names()` with fixture .ttf, test `search()` match/miss, test `supports()` always True, test `download()` raises NotImplementedError
+- [ ] T005 [P] [US1] Create/update unit test in `tests/unit/core/test_library_scanner.py` — test `_is_excluded()` helper returns `True` for paths containing `.anime_studio_trash`, `.git`, `.vscode` components and `False` for normal paths
+- [ ] T006 [P] [US1] Create/update unit test in `tests/unit/core/test_library_scanner.py` — test `scan_library()` excludes MKV files inside `.anime_studio_trash/` from `episodes` list in scan result
+- [ ] T007 [P] [US1] Create/update unit test in `tests/unit/core/test_library_scanner.py` — test `scan_library()` excludes font directories inside dot-prefixed directories from `font_directories` list in scan result
 
 ### Implementation for User Story 1
 
-- [x] T011 [US1] Implement `SystemFontHunter` class in src/hunters/system_font_hunter.py: `HunterProtocol` conformant, cross-platform dir scanning via `sys.platform` + `pathlib.Path`, lazy name→path index built on first `search()` call using `fonttools` TTFont nameID extraction, `is_cacheable=False` on returned `FontAsset`, `download()` raises `NotImplementedError`
-- [x] T012 [US1] Modify `FontResolver.resolve()` in src/core/font_resolver.py: add 3-line short-circuit after `hunter.search()` — if `results[0].font_asset` has `is_cacheable=False`, record CB success and return asset directly (skip `download` + `cache.store`)
-- [x] T013 [US1] Add unit test for `FontResolver` is_cacheable short-circuit in tests/unit/core/test_font_resolver.py: mock hunter returning `FontAsset(is_cacheable=False)`, verify `download()` never called, verify `cache.store()` never called
+- [ ] T008 [US1] Add `_is_excluded(path: Path, base: Path) -> bool` helper function to `src/core/library_scanner.py` — checks if any path component relative to `base` starts with `.`
+- [ ] T009 [US1] Apply `_is_excluded()` filter to `rglob("*.mkv")` results on line 24 of `src/core/library_scanner.py` — filter before sorting
+- [ ] T010 [US1] Apply `_is_excluded()` filter to font directory discovery in `src/core/library_scanner.py` — exclude `child` dirs whose resolved path passes through a dot-prefixed ancestor
+- [ ] T011 [US1] Run `tests/unit/core/test_library_scanner.py -v` and verify all new tests pass
 
-**Checkpoint**: `pytest tests/unit/hunters/ tests/contract/ tests/unit/core/test_font_resolver.py` — all pass. SystemFontHunter resolves "Arial" on Windows, falls through on miss, no cache writes.
+**Checkpoint**: Scanner no longer processes trashed files. Infinite reprocessing loop eliminated.
 
 ---
 
-## Phase 4: User Story 2 — Auto-Discovery from Anime Library (Priority: P1)
+## Phase 4: User Story 2 — Tool Discovery Diagnostic Logging (Priority: P1)
 
-**Goal**: Pipeline scan detects `Fonts/` dirs in the anime library, pre-ingests all .ttf/.otf into cache (O(1) per batch) before episode analysis, using `FontIngestionService`.
+**Goal**: Add per-step `DEBUG`-level logging to `DependencyChecker.discover_one()` so users can diagnose tool discovery failures from logs alone.
 
-**Independent Test**: Create temp dir with `Fonts/CustomFont.ttf`, run `scan_library()`, verify `font_directories` populated in `LibraryScanOutput`, run `FontIngestionService.ingest_directories()`, verify font in cache.
+**Independent Test**: Mock `Path.is_file()` to return `False` for all 5 discovery steps for `alass`. Run `discover_all()`. Assert DEBUG log output contains all 5 checked paths. Assert final `WARNING` log for missing optional tool.
 
 ### Tests for User Story 2
 
-- [x] T014 [P] [US2] Create unit tests for `FontIngestionService` in tests/unit/core/test_font_ingestion.py: test `ingest_directories()` with new fonts (success), test dedup (skipped), test corrupt font (failed), test empty dir, test mixed results (success+skipped+failed), verify structlog event emitted with correct fields
-- [x] T015 [P] [US2] Add unit tests for `scan_library()` font dir detection in tests/unit/core/test_library_scanner.py: test `Fonts/` detected, test `fonts/` detected (case-insensitive), test no-fonts-dir returns empty list, test `LibraryScanOutput` structure
+- [ ] T012 [P] [US2] Create/update unit test in `tests/unit/adapters/test_dependency_checker.py` — test that `discover_one()` emits exactly 5 DEBUG log entries on Windows when tool not found (one per discovery step with path and exists status)
+- [ ] T013 [P] [US2] Create/update unit test in `tests/unit/adapters/test_dependency_checker.py` — test that `discover_one()` emits summary INFO log when tool is found, including resolved path and which step succeeded
 
 ### Implementation for User Story 2
 
-- [x] T016 [US2] Implement `FontIngestionService` class in src/core/font_ingestion.py: async stateless service, constructor takes `FontCache` + `asyncio.Semaphore`, `ingest_directories()` scans for .ttf/.otf recursively, reads bytes via `asyncio.to_thread()`, extracts nameID via fonttools, dedup via `FontCache.lookup()`, stores via `FontCache.store()`, returns `FontIngestionResult`, logs `font_ingestion_complete` event via structlog
-- [x] T017 [US2] Implement `ingest_files()` method on `FontIngestionService` in src/core/font_ingestion.py: accepts list of individual file paths, same dedup/store/report logic as `ingest_directories()`, used by drag-drop
-- [x] T018 [US2] Modify `scan_library()` in src/core/library_scanner.py: change return type from `list[LibraryScanResult]` to `LibraryScanOutput`, detect `Fonts/`/`fonts/` directories during the `_scan()` walk (case-insensitive match on dir name), deduplicate by resolved path, populate `font_directories` field
-- [x] T019 [US2] Modify `PipelineRunner.__init__()` in src/core/pipeline_runner.py: add `font_ingestion_service: FontIngestionService` and `disk_semaphore: asyncio.Semaphore` parameters, store as instance attributes, replace per-run semaphore creation in `run()` with injected `self.disk_semaphore`
-- [x] T020 [US2] Modify `PipelineRunner.run()` in src/core/pipeline_runner.py: update scan call to unpack `LibraryScanOutput` (`scan_output.episodes`, `scan_output.font_directories`), add pre-pipeline step calling `self.font_ingestion_service.ingest_directories(font_dirs, source="auto_discovery")` between scan and analysis loop
-- [x] T021 [US2] Update `PipelineRunner` unit tests in tests/unit/core/test_pipeline_runner.py: mock `scan_library()` to return `LibraryScanOutput`, mock `FontIngestionService`, verify pre-pipeline ingestion called with font_dirs before `_analyze_episode`, verify semaphore injected correctly
+- [ ] T014 [US2] Add `logger.debug()` call at each of the 5 discovery steps in `DependencyChecker.discover_one()` in `src/adapters/dependency_checker.py` — each log must include `tool=spec.name`, `step=N`, `path=str(checked_path)`, `exists=bool`
+- [ ] T015 [US2] Add summary `logger.info()` call at end of `discover_one()` in `src/adapters/dependency_checker.py` — log resolved path and step number when found, or all checked paths when not found
+- [ ] T016 [US2] Run `tests/unit/adapters/test_dependency_checker.py -v` and verify all new tests pass
 
-**Checkpoint**: `pytest tests/unit/core/test_font_ingestion.py tests/unit/core/test_library_scanner.py tests/unit/core/test_pipeline_runner.py` — all pass. Pipeline ingests Fonts/ dirs once before analysis.
+**Checkpoint**: Tool discovery is now fully diagnosable from logs. Zero behavioral change.
 
 ---
 
-## Phase 5: User Story 3 — Manual Font Import (Priority: P2)
+## Phase 5: User Story 3 — SystemFontHunter Normalization & TTC (Priority: P0) 🎯 MVP
 
-**Goal**: User clicks "Import Fonts" button in MainWindow, selects folder via QFileDialog, async-ingests fonts into cache, result shown in Activity Feed.
+**Goal**: Fix `SystemFontHunter` to (a) scan `.ttc` TrueType Collection files and (b) apply progressive name normalization when exact match fails.
 
-**Independent Test**: Click "Import Fonts", select folder with sample fonts, verify Activity Feed shows "N new, M skipped, K failed".
+**Independent Test**: Create mock font index with entries like `"arial regular"`, `"segoe ui semibold"`. Query `"Arial"` → assert match via suffix stripping. Query `"Segoe UI Demi Bold"` → assert match via weight synonym. Create mock `.ttc` file with 2 fonts → assert both are indexed.
+
+### Tests for User Story 3
+
+- [ ] T017 [P] [US3] Create/update unit test in `tests/unit/hunters/test_system_font_hunter.py` — test exact match still works (fast path): query `"arial"` when index has `"arial"` → match
+- [ ] T018 [P] [US3] Create/update unit test in `tests/unit/hunters/test_system_font_hunter.py` — test suffix stripping: query `"Arial"` when index has `"arial regular"` → match via stripping `"regular"`
+- [ ] T019 [P] [US3] Create/update unit test in `tests/unit/hunters/test_system_font_hunter.py` — test suffix appending: query `"Arial Regular"` when index has `"arial regular"` → exact match; query `"Arial"` when only `"arial regular"` exists → match via append
+- [ ] T020 [P] [US3] Create/update unit test in `tests/unit/hunters/test_system_font_hunter.py` — test weight synonym expansion: query `"Segoe UI Demi Bold"` when index has `"segoe ui semibold"` → match; query `"MyFont Heavy"` when index has `"myfont bold"` → match
+- [ ] T021 [P] [US3] Create/update unit test in `tests/unit/hunters/test_system_font_hunter.py` — test `.ttc` extension is accepted in `_build_index()` — mock filesystem with `.ttc` file, verify fonts are indexed
+- [ ] T022 [P] [US3] Create/update unit test in `tests/unit/hunters/test_system_font_hunter.py` — test no false positives: query `"Times New Roman"` when index has `"arial"` → no match returned
 
 ### Implementation for User Story 3
 
-- [x] T022 [US3] Modify `bootstrap_app()` in src/gui/bootstrap.py: create shared `asyncio.Semaphore(config.max_concurrent_disk_io)`, instantiate `FontIngestionService(cache, disk_semaphore)`, pass both `font_ingestion_service` and `disk_semaphore` to `PipelineRunner`, pass `font_ingestion_service` to `MainWindow`
-- [x] T023 [US3] Modify `MainWindow.__init__()` in src/gui/main_window.py: accept `font_ingestion_service` parameter, add `QPushButton("Import Fonts")` in left panel config group (between `LibraryPickerWidget` and "Run Pipeline" button), connect button `clicked` signal to `_on_import_fonts_click`
-- [x] T024 [US3] Implement `_on_import_fonts_click()` as `@asyncSlot()` in src/gui/main_window.py: open `QFileDialog.getExistingDirectory()`, on selection call `await self.font_ingestion_service.ingest_directories([Path(folder)], source="manual_import")`, result emitted via structlog → SignalBridge → ActivityFeedWidget
-- [x] T025 [US3] Add unit test for Import Fonts button presence and dialog trigger in tests/unit/gui/test_main_window.py
+- [ ] T023 [US3] Add normalization constants to `src/hunters/system_font_hunter.py` — `FONT_EXTENSIONS`, `STRIP_SUFFIXES`, `WEIGHT_SYNONYMS` as module-level `frozenset`/`dict`
+- [ ] T024 [US3] Update `_build_index()` in `src/hunters/system_font_hunter.py` — change extension filter from `(".ttf", ".otf")` to `FONT_EXTENSIONS` frozenset (add `.ttc`)
+- [ ] T025 [US3] Add `.ttc` collection handling in `_build_index()` in `src/hunters/system_font_hunter.py` — for `.ttc` files, iterate `TTCollection.fonts` to extract names from ALL fonts in the collection, with try/except fallback to `fontNumber=0`
+- [ ] T026 [US3] Add `_strip_style_suffix(name: str) -> str` private method to `SystemFontHunter` in `src/hunters/system_font_hunter.py` — strips trailing tokens matching `STRIP_SUFFIXES`
+- [ ] T027 [US3] Add `_make_result(index_key: str, query: FontQuery) -> HunterResult` helper to `SystemFontHunter` in `src/hunters/system_font_hunter.py` — DRY extraction of the result-building logic from `search()`
+- [ ] T028 [US3] Refactor `search()` in `src/hunters/system_font_hunter.py` — replace single exact-match lookup with 4-tier progressive resolution: (1) exact match, (2) strip trailing suffix, (3) append common suffixes, (4) weight synonym expansion
+- [ ] T029 [US3] Add normalized keys during `_build_index()` in `src/hunters/system_font_hunter.py` — for each font, also index a version with style suffix stripped (e.g., `"arial regular"` → also index as `"arial"`)
+- [ ] T030 [US3] Run `tests/unit/hunters/test_system_font_hunter.py -v` and verify all new tests pass
 
-**Checkpoint**: Manual import button visible, QFileDialog opens, ingestion runs async, Activity Feed shows results.
+**Checkpoint**: SystemFontHunter finds Arial, Segoe UI, and variant-named fonts. `.ttc` system fonts are discoverable.
 
 ---
 
-## Phase 6: User Story 4 — Drag & Drop Font Import (Priority: P2)
+## Phase 6: User Story 4 — NetworkFontHunter Creation (Priority: P1)
 
-**Goal**: User drags folder or .ttf/.otf files onto MainWindow, drop triggers async ingestion, visual feedback during drag.
+**Goal**: Create a new `NetworkFontHunter` implementing `HunterProtocol` for Google Fonts API resolution. Gated behind `google_fonts_api_key` config field.
 
-**Independent Test**: Simulate drag-drop event with font folder, verify green border on dragover, verify Activity Feed shows ingestion result.
+**Independent Test**: Mock Google Fonts API response with `httpx`'s mock transport. Query `"Roboto"` → assert valid `HunterResult` returned. Assert `supports()` returns `False` when API key is `None`.
+
+### Tests for User Story 4
+
+- [ ] T031 [P] [US4] Create unit test in `tests/unit/hunters/test_network_font_hunter.py` — test `supports()` returns `False` when `config.google_fonts_api_key` is `None`
+- [ ] T032 [P] [US4] Create unit test in `tests/unit/hunters/test_network_font_hunter.py` — test `supports()` returns `True` when `config.google_fonts_api_key` is set
+- [ ] T033 [P] [US4] Create unit test in `tests/unit/hunters/test_network_font_hunter.py` — test `search()` with mocked HTTP response returns valid `HunterResult` with `font_asset` populated
+- [ ] T034 [P] [US4] Create unit test in `tests/unit/hunters/test_network_font_hunter.py` — test `search()` returns empty list when font not found in Google Fonts API (404 or empty items)
+- [ ] T035 [P] [US4] Create unit test in `tests/unit/hunters/test_network_font_hunter.py` — test `_make_client()` passes `proxy` kwarg when `config.proxy` is set
+- [ ] T036 [P] [US4] Create unit test in `tests/unit/hunters/test_network_font_hunter.py` — test `download()` returns valid `FontPayload` with font bytes from mocked HTTP response
+- [ ] T037 [P] [US4] Create contract test in `tests/contract/test_hunter_protocol.py` — verify `NetworkFontHunter` satisfies `HunterProtocol` (`isinstance` check with `@runtime_checkable`)
 
 ### Implementation for User Story 4
 
-- [x] T026 [US4] Implement drag-and-drop on `MainWindow` in src/gui/main_window.py: call `self.setAcceptDrops(True)` in `__init__`, store `self._default_style = self.styleSheet()`, override `dragEnterEvent()` to validate MIME URLs (folders or .ttf/.otf), set green border stylesheet on valid drag, override `dragLeaveEvent()` to reset style, override `dropEvent()` to reset style and dispatch to async handler
-- [x] T027 [US4] Implement `_handle_font_drop()` async method in src/gui/main_window.py: separate paths into dirs and files, call `ingest_directories()` for dirs and `ingest_files()` for individual font files, result flows through structlog
-- [x] T028 [US4] Implement `_is_valid_font_drop(url)` helper in src/gui/main_window.py: check `url.toLocalFile()` — accept if directory or if extension in `.ttf`/`.otf` (case-insensitive)
-- [x] T029 [US4] Add unit tests for drag-drop validation and event handling in tests/unit/gui/test_main_window.py: test dragEnterEvent accepts valid drops, rejects invalid, test dropEvent dispatches correctly
+- [ ] T038 [US4] Create `src/hunters/network_font_hunter.py` — implement `NetworkFontHunter` class with attributes: `name="GoogleFontsHunter"`, `priority=6`, `rate_limit=0.5`, `circuit_breaker_threshold=3`, `ping_url="https://fonts.google.com"`
+- [ ] T039 [US4] Implement `__init__(self, config: AppConfig)` in `src/hunters/network_font_hunter.py` — store config reference
+- [ ] T040 [US4] Implement `_make_client(self) -> httpx.AsyncClient` in `src/hunters/network_font_hunter.py` — create client with `timeout=10.0` and `proxy=self._config.proxy` when set
+- [ ] T041 [US4] Implement `supports(self, query: FontQuery) -> bool` in `src/hunters/network_font_hunter.py` — return `True` only when `self._config.google_fonts_api_key` is not `None`
+- [ ] T042 [US4] Implement `search(self, query: FontQuery) -> list[HunterResult]` in `src/hunters/network_font_hunter.py` — query Google Fonts API at `https://www.googleapis.com/webfonts/v1/webfonts`, filter by family name, return `HunterResult` with `FontAsset` containing download URL
+- [ ] T043 [US4] Implement `download(self, result: HunterResult) -> FontPayload` in `src/hunters/network_font_hunter.py` — download font file bytes from URL in `result.font_asset.file_path`, return `FontPayload` with font data, name, and extension
+- [ ] T044 [US4] Update `src/hunters/__init__.py` — add `NetworkFontHunter` to exports
+- [ ] T045 [US4] Run `tests/unit/hunters/test_network_font_hunter.py -v` and `tests/contract/test_hunter_protocol.py -v` — verify all new tests pass
 
-**Checkpoint**: Drag folder → green border → drop → ingestion → Activity Feed result. Drag .txt → rejected.
+**Checkpoint**: Network font resolution available via Google Fonts API. Fully optional — disabled when API key absent.
 
 ---
 
-## Phase 7: User Story 5 — Ingestion Feedback via Activity Feed (Priority: P1)
+## Phase 7: User Story 5 — Startup Ping Proxy & Circuit Breaker Fix (Priority: P0) 🎯 MVP
 
-**Goal**: All ingestion paths (auto-discovery, manual, drag-drop) report results through SignalBridge → ActivityFeedWidget with itemized counts.
+**Goal**: Fix `FontResolver.startup_ping()` to inject `config.proxy` into `httpx.AsyncClient` and reduce ping failure severity from force-trip to single failure record.
 
-**Independent Test**: Trigger ingestion with known inputs, verify Activity Feed shows "Font ingestion complete: N new, M skipped, K failed".
+**Independent Test**: Create `FontResolver` with `config.proxy = "socks5://127.0.0.1:1080"`. Call `startup_ping()` with mocked hunters. Assert `httpx.AsyncClient` was created with `proxy` kwarg. Simulate single ping failure → assert circuit breaker has exactly 1 failure (not 3).
 
-> **Note**: Most feedback wiring is already done in Phases 4-6 (structlog → GuiLogBridge → SignalBridge → ActivityFeedWidget). This phase validates the end-to-end flow and ensures message formatting.
+### Tests for User Story 5
+
+- [ ] T046 [P] [US5] Create/update unit test in `tests/unit/core/test_font_resolver.py` — test `startup_ping()` creates `httpx.AsyncClient` with `proxy` kwarg when `config.proxy` is set
+- [ ] T047 [P] [US5] Create/update unit test in `tests/unit/core/test_font_resolver.py` — test `startup_ping()` creates `httpx.AsyncClient` without `proxy` kwarg when `config.proxy` is `None`
+- [ ] T048 [P] [US5] Create/update unit test in `tests/unit/core/test_font_resolver.py` — test `_ping_hunter()` records exactly 1 failure on ping failure (not `circuit_breaker_threshold` failures)
+- [ ] T049 [P] [US5] Create/update unit test in `tests/unit/core/test_font_resolver.py` — test circuit breaker remains in CLOSED state after single ping failure (threshold is 3, only 1 failure recorded)
 
 ### Implementation for User Story 5
 
-- [x] T030 [US5] Verify structlog event `font_ingestion_complete` in `FontIngestionService` includes fields: `event`, `success_count`, `skipped_count`, `failed_count`, `source` — add/adjust if needed in src/core/font_ingestion.py
-- [x] T031 [US5] Verify `ActivityFeedWidget.add_entry()` correctly formats ingestion events in src/gui/widgets/activity_feed.py — the existing handler should display the structured log event, but verify the `font_ingestion_complete` event renders a human-readable message (e.g., "Font ingestion complete: 15 new, 3 skipped, 2 failed")
-- [x] T032 [US5] Add integration-style unit test in tests/unit/core/test_font_ingestion.py: verify structlog captures the `font_ingestion_complete` event with correct field values after ingestion
+- [ ] T050 [US5] Modify `startup_ping()` in `src/core/font_resolver.py` — build `client_kwargs` dict, conditionally add `proxy=self.config.proxy`, pass to `httpx.AsyncClient(**client_kwargs)`
+- [ ] T051 [US5] Modify `_ping_hunter()` in `src/core/font_resolver.py` — replace the force-trip loop (`for _ in range(threshold): cb.record_failure()`) with a single `cb.record_failure()` call
+- [ ] T052 [US5] Update warning log message in `_ping_hunter()` in `src/core/font_resolver.py` — change from "Opening circuit breaker" to "Hunter will still be attempted during resolution" to reflect softer behavior
+- [ ] T053 [US5] Run `tests/unit/core/test_font_resolver.py -v` and verify all new tests pass
 
-**Checkpoint**: End-to-end feedback verified for all three triggers.
+**Checkpoint**: Proxy users can reach network font sources. Single ping failure doesn't permanently disable hunters.
 
 ---
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-**Purpose**: Architecture validation, cleanup, and final checks
+**Purpose**: Final validation across all hotfix components.
 
-- [x] T033 [P] Update architecture boundary test in tests/unit/test_architecture_layering.py: verify `src/hunters/system_font_hunter.py` does not import from `src/gui/`, verify `src/core/font_ingestion.py` does not import from `src/gui/` or `PySide6`
-- [x] T034 [P] Run `ruff check src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py` — zero warnings
-- [x] T035 [P] Run `ruff format --check src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py` — no formatting changes needed
-- [x] T036 Run full test suite: `pytest tests/unit/ tests/contract/` — all pass, no regressions
-- [x] T037 Run quickstart.md smoke tests (manual validation of scenarios 1-11)
-- [x] T038 Verify mypy `src/hunters/system_font_hunter.py src/core/font_ingestion.py src/models/ingestion.py --strict` — zero errors
+- [ ] T054 [P] Run full test suite with `pytest tests/ -v --tb=short` — verify zero regressions
+- [ ] T055 [P] Run `ruff check src/core/library_scanner.py src/adapters/dependency_checker.py src/hunters/ src/core/font_resolver.py src/config.py` — verify zero lint warnings
+- [ ] T056 [P] Run `ruff format --check src/core/library_scanner.py src/adapters/dependency_checker.py src/hunters/ src/core/font_resolver.py src/config.py` — verify formatting
+- [ ] T057 Verify scanner exclusion end-to-end: create temp library with `.anime_studio_trash/` containing MKV files, run `scan_library()`, confirm excluded
+- [ ] T058 Verify font resolution end-to-end: run `SystemFontHunter.search()` against real system fonts (Arial, Segoe UI on Windows), confirm matches found
+- [ ] T059 Review all `structlog` log output for new/modified operations — confirm DEBUG/INFO/WARNING levels are appropriate per Constitution IX
+- [ ] T060 Run quickstart.md verification commands from `specs/007-font-ingestion/quickstart.md`
 
 ---
 
@@ -156,87 +197,93 @@
 
 ### Phase Dependencies
 
-```
-Phase 1 (Setup)
-    └──→ Phase 2 (Domain Models) ← BLOCKS ALL subsequent phases
-              ├──→ Phase 3 (US1: SystemFontHunter) ← can start after Phase 2
-              ├──→ Phase 4 (US2: Auto-Discovery + FontIngestionService) ← can start after Phase 2
-              │         ├──→ Phase 5 (US3: Manual Import) ← needs FontIngestionService from Phase 4
-              │         └──→ Phase 6 (US4: Drag & Drop) ← needs FontIngestionService from Phase 4
-              └──→ Phase 7 (US5: Feedback) ← needs structlog events from Phase 4
-                        └──→ Phase 8 (Polish) ← after all user stories
-```
+- **Setup (Phase 1)**: No dependencies — start immediately
+- **Foundational (Phase 2)**: No dependencies — can run in parallel with Phase 1
+- **US1 Scanner (Phase 3)**: No dependencies on other stories — can start after Phase 1 baseline
+- **US2 ToolDiscovery (Phase 4)**: No dependencies on other stories — can start after Phase 1 baseline
+- **US3 SystemFontHunter (Phase 5)**: No dependencies on other stories — can start after Phase 1 baseline
+- **US4 NetworkFontHunter (Phase 6)**: Depends on **Phase 2** (T003 config extension)
+- **US5 StartupPing (Phase 7)**: No dependencies on other stories — can start after Phase 1 baseline
+- **Polish (Phase 8)**: Depends on ALL previous phases
 
 ### User Story Dependencies
 
-- **US1 (SystemFontHunter)**: Depends only on Phase 2 models. Independent of US2-US5.
-- **US2 (Auto-Discovery)**: Depends on Phase 2 models. Independent of US1, but US3/US4 need `FontIngestionService` created here.
-- **US3 (Manual Import)**: Depends on `FontIngestionService` from US2. Independent of US1, US4.
-- **US4 (Drag & Drop)**: Depends on `FontIngestionService` from US2. Independent of US1, US3.
-- **US5 (Feedback)**: Depends on structlog events from US2's `FontIngestionService`. Can run after US2.
+```mermaid
+graph TD
+    P1[Phase 1: Setup] --> P3[Phase 3: US1 Scanner]
+    P1 --> P4[Phase 4: US2 ToolDiscovery]
+    P1 --> P5[Phase 5: US3 SystemFontHunter]
+    P1 --> P7[Phase 7: US5 StartupPing]
+    P2[Phase 2: Foundational] --> P6[Phase 6: US4 NetworkFontHunter]
+    P3 --> P8[Phase 8: Polish]
+    P4 --> P8
+    P5 --> P8
+    P6 --> P8
+    P7 --> P8
+```
 
-### Within Each Phase
+### Within Each User Story
 
-1. Tests written first (where included)
-2. Domain models before services
-3. Services before integrations
-4. Core before GUI
-5. All [P] tasks within a phase can run in parallel
+- Tests MUST be written and FAIL before implementation
+- Implementation follows plan.md's proposed changes
+- Story complete before moving to Polish
 
 ### Parallel Opportunities
 
-```
-Phase 2: T003, T004, T005 run in parallel (different model files)
-Phase 2: T006, T007, T008 run in parallel (different test files)
-Phase 3: T009, T010 run in parallel (different test files)
-Phase 5 + Phase 6: Can run in parallel (US3 + US4 both need FontIngestionService but touch different GUI code)
-Phase 8: T033, T034, T035 run in parallel (different validation tools)
-```
+- **Phase 3, 4, 5, 7** (US1, US2, US3, US5) can ALL run in parallel — they modify different files with zero overlap
+- **Phase 6** (US4) can run in parallel with Phases 3, 4, 5, 7 once Phase 2 (T003) is done
+- All test tasks within a story marked `[P]` can run in parallel
+- Within Phase 8, all `[P]` tasks can run in parallel
 
 ---
 
-## Parallel Example: Phase 2 (Domain Models)
+## Parallel Example: All MVP Stories
 
 ```bash
-# Launch all model changes in parallel (different files):
-Task T003: "Add is_cacheable to FontAsset in src/models/font.py"
-Task T004: "Create FontIngestionResult in src/models/ingestion.py"
-Task T005: "Add LibraryScanOutput to src/models/pipeline.py"
+# After Phase 1 baseline is confirmed, launch all P0 stories simultaneously:
 
-# Then launch all model tests in parallel:
-Task T006: "Test is_cacheable in tests/unit/models/test_font.py"
-Task T007: "Test FontIngestionResult in tests/unit/models/test_ingestion.py"
-Task T008: "Test LibraryScanOutput in tests/unit/models/test_pipeline_models.py"
+# Agent A: Scanner fix
+Task: "T005-T011 — Scanner trash exclusion in src/core/library_scanner.py"
+
+# Agent B: SystemFontHunter normalization
+Task: "T017-T030 — Font normalization + TTC in src/hunters/system_font_hunter.py"
+
+# Agent C: Startup ping fix
+Task: "T046-T053 — Proxy injection + soft CB in src/core/font_resolver.py"
+
+# Agent D: Tool discovery logging
+Task: "T012-T016 — Diagnostic logging in src/adapters/dependency_checker.py"
 ```
 
 ---
 
 ## Implementation Strategy
 
-### MVP First (US1 + US2 Only)
+### MVP First (P0 Blockers Only)
 
-1. Complete Phase 1: Setup (fixtures)
-2. Complete Phase 2: Domain Models (all 3 model changes)
-3. Complete Phase 3: SystemFontHunter (resolve system fonts in-place)
-4. Complete Phase 4: FontIngestionService + Scanner + Pipeline changes
-5. **STOP and VALIDATE**: Test system font resolution + auto-discovery independently
-6. Run `pytest` — all tests pass, no regressions
+1. Complete Phase 1: Setup (T001-T002)
+2. Complete Phase 3: US1 Scanner (T005-T011) — eliminates trash loop
+3. Complete Phase 5: US3 SystemFontHunter (T017-T030) — fixes font resolution
+4. Complete Phase 7: US5 StartupPing (T046-T053) — fixes proxy/CB
+5. **STOP and VALIDATE**: Run full test suite, verify all 3 critical bugs resolved
+6. Ship hotfix
 
-### Full Delivery (US1 → US5)
+### Full Delivery
 
-1. Complete MVP (Phases 1-4)
-2. Phase 5: Manual Import button (GUI addition)
-3. Phase 6: Drag & Drop (GUI addition)
-4. Phase 7: Feedback validation (end-to-end)
-5. Phase 8: Polish, linting, architecture tests
-6. Run full quickstart.md smoke tests
+1. MVP above → verify
+2. Add Phase 2 + Phase 6: US4 NetworkFontHunter → test independently
+3. Add Phase 4: US2 ToolDiscovery logging → test independently
+4. Complete Phase 8: Polish → full validation
+5. Ship complete hotfix
 
-### Layer Order (User-Mandated)
+### Incremental Delivery
 
-1. **Inner**: Domain Models (Phase 2) — `FontAsset`, `LibraryScanOutput`, `FontIngestionResult`
-2. **Middle**: Core Services + Hunters (Phases 3-4) — `SystemFontHunter`, `FontIngestionService`
-3. **Middle**: Core Integrations (Phase 4) — `LibraryScanner`, `PipelineRunner`, `FontResolver`
-4. **Outer**: Presentation (Phases 5-6) — `MainWindow` UI, drag-drop, signals
+Each story adds value independently:
+- **US1 alone**: No more infinite reprocessing loops
+- **US3 alone**: System fonts (Arial, Segoe, CJK) now resolve correctly
+- **US5 alone**: Proxy users get working network resolution
+- **US4 alone**: Google Fonts API provides network font fallback
+- **US2 alone**: Tool discovery failures become diagnosable
 
 ---
 
@@ -244,7 +291,8 @@ Task T008: "Test LibraryScanOutput in tests/unit/models/test_pipeline_models.py"
 
 - [P] tasks = different files, no dependencies
 - [Story] label maps task to specific user story for traceability
-- Each user story is independently testable at its checkpoint
-- Constitution compliance verified at Phase 8 (architecture boundary + ruff + mypy)
-- `FontIngestionService` is the shared dependency for US3, US4, US5 — created in US2's phase
-- No implementation code in this file — tasks are executable specifications
+- Each user story is independently completable and testable
+- Verify tests fail before implementing
+- Commit after each task or logical group
+- Stop at any checkpoint to validate story independently
+- File overlap analysis: **zero overlap** between stories — each modifies a unique file

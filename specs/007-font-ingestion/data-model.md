@@ -1,152 +1,140 @@
-# Data Model: Font Ingestion System
+# Data Model: Hotfix — Core Stability & Hunter Resolution (v1.7.0)
 
-**Feature**: 007-font-ingestion
-**Date**: 2026-05-27
+**Generated**: 2026-05-27 | **Status**: Complete
 
-## Entities
+## Overview
 
-### Modified Entities
+This hotfix modifies **no data models**. All existing domain models remain structurally unchanged.
+The only model-adjacent changes are:
 
-#### FontAsset (`src/models/font.py`)
+1. A new `google_fonts_api_key` field on `AppConfig` (configuration, not domain model)
+2. New internal constants in `SystemFontHunter` for normalization (private, not exposed)
 
-Add `is_cacheable` field to support system font resolve-in-place:
+## Existing Models (Unchanged)
 
-| Field | Type | Default | Change |
-|-------|------|---------|--------|
-| `name` | `str` | — | existing |
-| `file_path` | `SerializablePath` | — | existing |
-| `source` | `str` | — | existing |
-| `layer_found` | `int` | — | existing (0-6) |
-| `cache_hit` | `bool` | — | existing |
-| `nameids` | `dict[int, str]` | — | existing |
-| `is_patched` | `bool` | `False` | existing |
-| `patch_reason` | `str \| None` | `None` | existing |
-| **`is_cacheable`** | **`bool`** | **`True`** | **NEW** |
+### FontQuery
 
-When `is_cacheable=False`, the pipeline skips `FontCache.store()` and uses the absolute path directly. Only `SystemFontHunter` sets this to `False`.
-
-#### LibraryScanResult → LibraryScanOutput (`src/models/pipeline.py`)
-
-Wrap existing `LibraryScanResult` in a new output model:
-
-**Existing `LibraryScanResult`** (unchanged):
-| Field | Type |
-|-------|------|
-| `episode_path` | `SerializablePath` |
-| `subtitle_path` | `SerializablePath` |
-| `anime_title` | `str` |
-
-**New `LibraryScanOutput`**:
-| Field | Type | Default |
-|-------|------|---------|
-| `episodes` | `list[LibraryScanResult]` | — |
-| `font_directories` | `list[SerializablePath]` | `[]` |
-
-`scan_library()` return type changes from `list[LibraryScanResult]` → `LibraryScanOutput`.
-
-### New Entities
-
-#### FontIngestionResult (`src/models/ingestion.py`)
-
-Value object returned by all ingestion operations:
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `success_count` | `int` | Fonts successfully copied to cache |
-| `skipped_count` | `int` | Fonts skipped (already in cache by name) |
-| `failed_count` | `int` | Fonts that failed (corrupt, permission error) |
-| `failed_details` | `list[tuple[SerializablePath, str]]` | (path, error message) for each failure |
-| `source` | `str` | Origin: `"auto_discovery"`, `"manual_import"`, or `"drag_drop"` |
-
-Frozen Pydantic `BaseModel` with `ConfigDict(frozen=True)`.
-
-### New Services
-
-#### FontIngestionService (`src/core/font_ingestion.py`)
-
-Stateless async service. Core layer — no Qt/GUI imports.
-
-**Constructor dependencies** (injected):
-| Dependency | Type | Purpose |
-|------------|------|---------|
-| `cache` | `FontCache` | Lookup for dedup, store for new fonts |
-| `disk_semaphore` | `asyncio.Semaphore` | Bound concurrent disk I/O |
-
-**Public methods**:
-| Method | Signature | Purpose |
-|--------|-----------|---------|
-| `ingest_directories` | `async (dirs: list[Path], source: str) -> FontIngestionResult` | Scan dirs for .ttf/.otf, dedup, ingest |
-| `ingest_files` | `async (files: list[Path], source: str) -> FontIngestionResult` | Ingest specific font files |
-
-#### SystemFontHunter (`src/hunters/system_font_hunter.py`)
-
-`HunterProtocol` implementation for OS font resolution.
-
-**Attributes**:
-| Attribute | Value | Rationale |
-|-----------|-------|-----------|
-| `name` | `"system_fonts"` | Descriptive identifier |
-| `priority` | `4` | Layer 4: between sibling scan (3) and network (5) |
-| `rate_limit` | `0.0` | Local I/O, no throttling needed |
-| `circuit_breaker_threshold` | `3` | Default; trips on repeated OS access errors |
-| `ping_url` | `None` | No network; startup_ping skips it |
-
-**Behavior**:
-- `supports(query)`: Always `True` — any font could be a system font.
-- `search(query)`: Lazily builds name→path index on first call via `fonttools`. Matches `query.requested_name` case-insensitively. Returns `HunterResult` with `FontAsset(is_cacheable=False, source="system", file_path=<absolute_path>)`.
-- `download(result)`: Raises `NotImplementedError` — never called when `is_cacheable=False`.
-
-## Relationships
-
+```python
+# src/models/font.py — NO CHANGES
+class FontQuery(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    requested_name: str
+    anime_title: str
+    episode_path: SerializablePath
 ```
-MainWindow (GUI)
-    ├── "Import Fonts" button ──→ QFileDialog ──→ asyncSlot ──→ FontIngestionService.ingest_directories()
-    ├── Drop event ──→ asyncSlot ──→ FontIngestionService.ingest_files() / ingest_directories()
-    └── SignalBridge.log_received ←── structlog ←── FontIngestionService (logs results)
 
-PipelineRunner (Core)
-    ├── scan_library() ──→ LibraryScanOutput (episodes + font_directories)
-    ├── FontIngestionService.ingest_directories(font_dirs) ──→ pre-pipeline step
-    └── FontResolver.resolve(query) ──→ HunterRegistry.iter_hunters()
-                                            ├── SystemFontHunter.search(query) ──→ FontAsset(is_cacheable=False)
-                                            │   └── [resolver skips download+store]
-                                            └── [other hunters] ──→ download ──→ cache.store
+### FontAsset
 
-FontIngestionService (Core)
-    ├── reads bytes ──→ asyncio.to_thread(path.read_bytes)
-    ├── parses names ──→ fonttools (nameID 1, 4)
-    ├── dedup check ──→ FontCache.lookup(name)
-    └── stores new ──→ FontCache.store(FontPayload)
+```python
+# src/models/font.py — NO CHANGES
+class FontAsset(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    name: str
+    file_path: SerializablePath
+    source: str
+    layer_found: int
+    cache_hit: bool
+    nameids: dict[int, str] = {}
+    is_cacheable: bool = True
+    is_patched: bool = False
+    patch_reason: str | None = None
+```
 
-bootstrap_app() (DI Assembly)
-    ├── asyncio.Semaphore(config.max_concurrent_disk_io) ──→ [shared singleton]
-    ├── FontIngestionService(cache, disk_semaphore)
-    ├── PipelineRunner(font_resolver, ..., disk_semaphore)
-    └── MainWindow(pipeline_runner, font_ingestion_service, log_bridge, config)
+### HunterResult
+
+```python
+# src/models/font.py — NO CHANGES
+class HunterResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    query: FontQuery
+    font_asset: FontAsset | None = None
+    success: bool
+    hunter_name: str
+    duration_ms: float
+    attempts: int = 1
+```
+
+### LibraryScanOutput
+
+```python
+# src/models/pipeline.py — NO CHANGES
+class LibraryScanOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    episodes: list[LibraryScanResult]
+    font_directories: list[SerializablePath]
+```
+
+## Configuration Model Extension
+
+### AppConfig
+
+```python
+# src/config.py — ADDITIVE CHANGE ONLY
+class AppConfig(BaseModel):
+    # ... existing fields unchanged ...
+    proxy: str | None = None
+    circuit_breaker_cooldown_s: float = Field(default=60.0, ge=0.0)
+    startup_ping_timeout_s: float = Field(default=2.0, ge=0.0)
+    # NEW FIELD:
+    google_fonts_api_key: str | None = None  # Required for NetworkFontHunter
+```
+
+## Internal Types (New, Not Domain Models)
+
+### SystemFontHunter Normalization Constants
+
+```python
+# src/hunters/system_font_hunter.py — module-level constants
+FONT_EXTENSIONS: frozenset[str] = frozenset({".ttf", ".otf", ".ttc"})
+
+STRIP_SUFFIXES: frozenset[str] = frozenset({
+    "regular", "normal", "book", "roman", "plain", "standard",
+    "medium", "text", "display",
+})
+
+WEIGHT_SYNONYMS: dict[str, set[str]] = {
+    "semibold": {"demibold", "demi bold", "semi bold"},
+    "bold": {"heavy", "black", "dark"},
+    "light": {"thin", "hairline", "ultralight", "extra light", "extralight"},
+    "extrabold": {"ultra bold", "ultrabold", "extra bold"},
+}
+```
+
+## Entity Relationships
+
+```mermaid
+graph TD
+    subgraph "Font Resolution Chain (unchanged)"
+        FQ[FontQuery] --> FR[FontResolver]
+        FR --> FC[FontCache.lookup]
+        FC -->|miss| HR[HunterRegistry.iter_hunters]
+        HR --> SFH[SystemFontHunter]
+        HR --> NFH["NetworkFontHunter (NEW)"]
+        SFH -->|match| FA[FontAsset]
+        NFH -->|match| FP[FontPayload]
+        FP --> FC2[FontCache.store]
+        FC2 --> FA
+    end
+
+    subgraph "Library Scanner (modified)"
+        LS[library_scanner.scan_library] -->|rglob + filter| MKV[MKV files]
+        LS -->|iterdir + filter| FD[Font directories]
+        MKV -->|exclude dot-dirs| LSO[LibraryScanOutput]
+        FD -->|exclude dot-dirs| LSO
+    end
 ```
 
 ## State Transitions
 
-### Font Ingestion Flow
+### Circuit Breaker (unchanged behavior, softer ping trigger)
 
-```
-IDLE ──[trigger]──→ SCANNING_SOURCE
-  triggers: Import button, drag-drop, auto-discovery
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: threshold consecutive failures
+    OPEN --> HALF_OPEN: cooldown_s elapsed
+    HALF_OPEN --> CLOSED: success
+    HALF_OPEN --> OPEN: failure
 
-SCANNING_SOURCE ──[found files]──→ PROCESSING
-  action: enumerate .ttf/.otf files in source directories
-
-PROCESSING ──[per file]──→ DEDUP_CHECK
-  action: read bytes, extract nameID via fonttools
-
-DEDUP_CHECK
-  ├─ [name in cache] ──→ SKIPPED (increment skipped_count)
-  └─ [name not in cache] ──→ STORING
-       action: FontCache.store(payload)
-       └─ [success] ──→ STORED (increment success_count)
-       └─ [failure] ──→ FAILED (increment failed_count, log WARNING)
-
-All files processed ──→ COMPLETE
-  action: log FontIngestionResult via structlog
-  signal: SignalBridge.log_received ──→ ActivityFeedWidget
+    note right of CLOSED: Startup ping: 1 failure recorded (was: threshold failures)
 ```

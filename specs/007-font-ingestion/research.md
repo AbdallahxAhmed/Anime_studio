@@ -1,220 +1,109 @@
-# Research: Font Ingestion System
+# Research: Hotfix — Core Stability & Hunter Resolution (v1.7.0)
 
-**Feature**: 007-font-ingestion
-**Date**: 2026-05-27
+**Generated**: 2026-05-27 | **Status**: Complete
 
-## 1. System Font Directory Enumeration (Cross-Platform)
+## Research Task 1: Scanner Trash Exclusion
 
-**Decision**: Use `pathlib.Path` with per-OS hardcoded directories + `fonttools` for metadata extraction. No Qt imports.
+**Decision**: Filter all dot-prefixed directories from `rglob()` results via a `_is_excluded()` helper.
 
-**Rationale**: Constitution mandates cross-platform support (Principle II) and forbids Qt imports in non-GUI layers (Principle I). The `QFontDatabase` approach would violate hexagonal boundaries. `fonttools` is already an approved dependency for font introspection.
-
-**OS Font Directories**:
-| OS | Directories |
-|----|-------------|
-| Windows | `C:\Windows\Fonts`, `~\AppData\Local\Microsoft\Windows\Fonts` |
-| Linux | `/usr/share/fonts/`, `/usr/local/share/fonts/`, `~/.local/share/fonts/` |
-| macOS | `~/Library/Fonts/`, `/Library/Fonts/`, `/System/Library/Fonts/` |
-
-**Discovery Pattern**:
-```python
-import sys
-from pathlib import Path
-
-def _get_system_font_dirs() -> list[Path]:
-    if sys.platform == "win32":
-        return [
-            Path("C:/Windows/Fonts"),
-            Path.home() / "AppData/Local/Microsoft/Windows/Fonts",
-        ]
-    elif sys.platform == "darwin":
-        return [
-            Path.home() / "Library/Fonts",
-            Path("/Library/Fonts"),
-            Path("/System/Library/Fonts"),
-        ]
-    else:  # Linux/BSD
-        return [
-            Path.home() / ".local/share/fonts",
-            Path("/usr/local/share/fonts"),
-            Path("/usr/share/fonts"),
-        ]
-```
-
-**Index Building**: Lazily build on first `search()` call. Use `asyncio.to_thread()` to offload the blocking `fonttools` reads. Cache the index for session lifetime (no file watch — system fonts rarely change mid-session).
+**Rationale**: The scanner at `src/core/library_scanner.py` uses `lib_path.rglob("*.mkv")` with zero path filtering. Both `MuxJob.plan_trash_disposal()` and `SubtitleFile.plan_trash_disposal()` create trash paths under `.anime_studio_trash/` as siblings of episode directories. This means trashed MKV files are re-discovered as valid episodes on subsequent scans.
 
 **Alternatives Considered**:
-- `QFontDatabase`: Knows all installed fonts but lives in Qt layer. Catastrophic hexagonal violation.
-- `matplotlib.font_manager`: Heavy dependency, not approved.
-- `os.listdir` + filename matching: Unreliable — font filenames don't always match internal names (e.g., `comic.ttf` → "Comic Sans MS").
+- **Hardcode `.anime_studio_trash` exclusion only**: Rejected — too narrow. `.git/`, `.vscode/`, and any future dot-directories would still pollute results. The Unix convention of hiding dot-prefixed directories is universal and safe.
+- **Use `os.walk()` with `topdown=True` and prune dirs**: Considered — would be more efficient (avoids descending into excluded directories) but requires rewriting the entire scan loop. `rglob` + post-filter is simpler and the performance difference is negligible for typical anime library sizes (~1000 files).
+- **Add an explicit exclusion list to config**: Over-engineering for a hotfix. Can be added later if needed.
 
-## 2. fonttools nameID Matching Strategy
+**Implementation Note**: The filter must check ALL path components relative to the library root, not just the immediate parent. A deeply nested `.anime_studio_trash/Season 1/foo.mkv` must also be excluded.
 
-**Decision**: Read nameID 1 (Font Family), nameID 4 (Full Name), and nameID 6 (PostScript Name) from each font file. Match the ASS `fontname` against all three, case-insensitive. First match wins.
+---
 
-**Rationale**: ASS subtitle files reference fonts by display name (nameID 4) most commonly, but some use the family name (nameID 1) or even PostScript name (nameID 6). Checking all three covers 99%+ of subtitle font references.
+## Research Task 2: Dependency Checker Discovery Hierarchy
 
-**Pattern**:
-```python
-from fontTools.ttLib import TTFont
+**Decision**: No functional changes needed. Add per-step diagnostic logging only.
 
-def _extract_font_names(font_path: Path) -> set[str]:
-    """Extract searchable font names from a font file."""
-    names: set[str] = set()
-    try:
-        font = TTFont(font_path, fontNumber=0)
-        name_table = font["name"]
-        for name_id in (1, 4, 6, 16):  # family, full, postscript, typographic family
-            record = name_table.getName(name_id, 3, 1, 0x0409)  # Windows, Unicode BMP, English
-            if record:
-                names.add(record.toUnicode().strip().lower())
-            record = name_table.getName(name_id, 1, 0, 0)  # Mac, Roman, English
-            if record:
-                names.add(record.toUnicode().strip().lower())
-        font.close()
-    except Exception:
-        pass  # Corrupt/unreadable font — skip
-    return names
-```
+**Rationale**: The existing `discover_one()` method in `src/adapters/dependency_checker.py` correctly implements all 5 steps from Constitution Section XIII:
+1. `~/scoop/shims/<tool>.exe` ✓
+2. `~/scoop/apps/<tool>/current/**/<tool>.exe` ✓
+3. `C:\Program Files\mpv\<tool>.exe` ✓
+4. `C:\Program Files\<win_folder_name>\**\<tool>.exe` ✓
+5. `shutil.which(<tool>)` ✓
 
-**Deduplication**: During ingestion, the primary name (nameID 4, falling back to nameID 1) is used as the cache key. If a font with the same primary name already exists in `FontCache`, the file is skipped.
+The original bug report stating this "violates the 5-step discovery rule" is incorrect — the code is already compliant. The real issue is that when discovery fails, there is zero diagnostic output explaining which paths were checked.
 
 **Alternatives Considered**:
-- Filename matching: Unreliable (`arial.ttf` → "Arial", but `ARIALBI.TTF` → "Arial Bold Italic").
-- SHA-256 hash: Detects identical bytes but misses same-font-different-version scenarios.
-- All nameIDs: Over-matching — nameID 2 (style: "Regular", "Bold") would cause false positives.
+- **Rewrite discovery logic**: Rejected — the logic is already correct. Rewriting would risk introducing regressions.
+- **Add a `--diagnose-tools` CLI flag**: Over-scoped for a hotfix. DEBUG logging is sufficient.
 
-## 3. Async Font Ingestion Strategy
+---
 
-**Decision**: `FontIngestionService` reads source font bytes via `asyncio.to_thread(path.read_bytes)`, extracts nameID via `fonttools`, deduplicates against `FontCache.lookup()`, then calls `FontCache.store()` for new fonts. The application-scoped disk I/O `asyncio.Semaphore` gates concurrent file reads.
+## Research Task 3: System Font Hunter Name Extraction
 
-**Rationale**: `FontCache.store()` already handles atomic writes (temp file → `replace()`). Reusing it avoids duplicating the write-safety logic and keeps the TOML index consistent. The semaphore is required by Constitution Principle III (Disk I/O Protection).
+**Decision**: Add `.ttc` support + multi-tier normalization in `search()`.
 
-**Flow**:
-```
-For each .ttf/.otf file in source directory:
-  1. Acquire disk I/O semaphore
-  2. asyncio.to_thread(file.read_bytes)  →  raw bytes
-  3. fonttools: extract primary name (nameID 4 → 1 fallback)
-  4. FontCache.lookup(primary_name)
-     ├─ HIT  → skip, increment skipped_count
-     └─ MISS → FontCache.store(FontPayload(...)) → increment success_count
-  5. Release semaphore
-  On exception → increment failed_count, log WARNING, continue
-```
+**Rationale**: The `_extract_font_names()` function correctly extracts nameIDs 1, 4, 6, 16 from both Windows (platformID=3) and Mac (platformID=1) records. However:
 
-**Batch Index Update**: Currently `FontCache.store()` saves the TOML index after each font. For bulk ingestion (100+ fonts), this is O(n) TOML writes. Optimization: add a `FontCache.store_batch(payloads)` method that writes the index once at the end. This is a non-breaking additive change.
+1. **Missing `.ttc`**: Line 106 filters only `.ttf`/`.otf`. TrueType Collections (`.ttc`) are common on Windows (CJK fonts) and macOS (many system fonts). `fonttools.TTFont` can open `.ttc` files via `fontNumber=0`, but only indexes the first font. Full coverage requires `TTCollection` iteration.
 
-**Alternatives Considered**:
-- `shutil.copy2()` + separate index update: Bypasses `FontCache.store()` atomic safety. More code, less safe.
-- Streaming async read/write: Over-engineered for font files (typically 50KB-5MB).
-- `QThread`: Forbidden — violates hexagonal boundaries and constitution.
+2. **No normalization**: The `search()` method does `requested in self._index` — a strict exact-match on lowercased strings. This fails when:
+   - ASS requests `"Arial"` but index only has `"arial regular"` (nameID 4 included the style)
+   - ASS requests `"Segoe UI Semibold"` but font uses `"Segoe UI SemiBold"` (casing) or `"Segoe UI Demi Bold"` (synonym)
+   - Font uses unusual weight names like `"Heavy"`, `"Poster"`, `"Hairline"`
 
-## 4. LibraryScanOutput Restructuring
-
-**Decision**: Introduce `LibraryScanOutput` wrapper model containing `episodes: list[LibraryScanResult]` and `font_directories: list[Path]`. Modify `scan_library()` to return `LibraryScanOutput`.
-
-**Rationale**: `LibraryScanResult` is per-episode (one per MKV+ASS pair). Font directories are per-library. Adding `font_directories` to each `LibraryScanResult` would wastefully duplicate the same list across all episodes. A wrapper cleanly separates the two concerns.
-
-**Impact on PipelineRunner**: Minimal. Change `scan_results = await scan_library(...)` to:
-```python
-scan_output = await scan_library(pipeline_config.library_path)
-scan_results = scan_output.episodes
-font_dirs = scan_output.font_directories
-```
-
-**Scan Logic**: During the existing `rglob("*.mkv")` walk, also detect `Fonts/` and `fonts/` directories. Since `rglob` only finds files, add a separate check: `library_path.rglob("*")` filtered to directories matching `fonts` (case-insensitive). Deduplicate by resolved path.
-
-**Optimization**: Use a single `os.walk()` (via `asyncio.to_thread()`) instead of two `rglob()` calls. Collect both MKV paths and font directories in one pass.
+**Normalization Strategy** (progressive, from cheapest to most expensive):
+1. Exact match (existing fast path)
+2. Strip trailing style suffixes ("Regular", "Normal", "Book", "Roman", etc.)
+3. Try appending common suffixes to bare family name
+4. Weight synonym expansion (e.g., "Semibold" ↔ "Demi Bold")
 
 **Alternatives Considered**:
-- Return `tuple[list[LibraryScanResult], list[Path]]`: Less structured, harder to extend.
-- Add to each `LibraryScanResult`: Wasteful duplication (same list × N episodes).
-- Separate `scan_font_directories()` function: Extra directory walk.
+- **Fuzzy matching (Levenshtein distance)**: Rejected — too risky for a hotfix. False positives (matching the wrong font) are worse than false negatives. Can be explored in a future iteration.
+- **Pre-normalize all index keys during build**: Partially adopted — generate additional stripped keys during index build. But keep originals too for exact-match fast path.
 
-## 5. FontResolver Modification for is_cacheable
+---
 
-**Decision**: Add a 3-line check in `FontResolver.resolve()` after `hunter.search()` returns. If the first `HunterResult` contains a `FontAsset` with `is_cacheable=False`, return it directly — skip `download()` and `cache.store()`.
+## Research Task 4: Network Font Hunter Architecture
 
-**Rationale**: `SystemFontHunter` resolves fonts in-place (absolute path to system font). There's no "download" step and no reason to copy into cache. The hunter's `search()` method returns a fully-populated `FontAsset` directly in the `HunterResult.font_asset` field.
+**Decision**: Create a new `NetworkFontHunter` implementing `HunterProtocol` with Google Fonts API as the initial source.
 
-**Code Change** (in `font_resolver.py` L60-68, inside the hunter iteration loop):
-```python
-results = await hunter.search(query)
-if results and results[0].success:
-    # System fonts resolve in-place — skip download and cache
-    if results[0].font_asset and not results[0].font_asset.is_cacheable:
-        cb.record_success()
-        return results[0].font_asset
-    # Network/other hunters — download and cache
-    payload = await hunter.download(results[0])
-    asset = self.cache.store(payload, layer_found=hunter.priority)
-```
+**Rationale**: `src/hunters/` contains only `registry.py` and `system_font_hunter.py`. No network-based font resolution exists. The resolution chain is Cache → SystemFontHunter → failure. Any font not installed locally and not in the cache is unresolvable.
 
-**SystemFontHunter.download()**: Must exist to satisfy `HunterProtocol` but should raise `NotImplementedError` — it should never be called when the resolver correctly checks `is_cacheable`.
+**Design Decisions**:
+- **Single file, single source (Google Fonts)**: Start minimal. Additional sources (DaFont, FontSquirrel) can be added as separate hunter implementations later.
+- **API key gated**: `supports()` returns `False` when `google_fonts_api_key` is absent from config. Zero functionality when unconfigured — no crashes, no errors.
+- **Client-per-request**: Create `httpx.AsyncClient` per operation via `_make_client()`. Avoids holding open connections and simplifies proxy injection. The rate limiter in `FontResolver` already throttles requests.
+- **Priority 6**: After cache (implicit layer 1) and system fonts (priority 4). Before any future lower-priority hunters.
 
 **Alternatives Considered**:
-- Skip based on hunter type name: Fragile string matching, violates OCP.
-- Add `is_local` flag to HunterProtocol: Protocol change affects all hunters. `is_cacheable` on FontAsset is more granular and already decided during /grill-me.
+- **Scraping Google Fonts website**: Rejected — fragile, violates ToS, blocked by CDN. API is stable and free.
+- **Bundling a font list**: Rejected — becomes stale. Live API query ensures up-to-date results.
+- **Making network hunter mandatory**: Rejected — many users run offline or behind strict firewalls. Optional-by-API-key is the right default.
 
-## 6. PySide6 Drag & Drop Implementation
+---
 
-**Decision**: `setAcceptDrops(True)` on `MainWindow`. Override `dragEnterEvent()` for MIME validation and visual feedback. Override `dropEvent()` to trigger async ingestion via `@asyncSlot()`.
+## Research Task 5: Startup Ping & Circuit Breaker Behavior
 
-**Rationale**: Qt's drag-drop system uses event overrides on the target widget. The MainWindow is the broadest target — easy to hit, discoverable. MIME type filtering (`hasUrls()` + extension check) prevents accidental ingestion of non-font items.
+**Decision**: Inject `config.proxy` into `startup_ping()`'s `httpx.AsyncClient`. Reduce ping failure from force-trip to single failure record.
 
-**Pattern**:
-```python
-class MainWindow(QMainWindow):
-    def __init__(self, ...):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self._default_style = self.styleSheet()
+**Rationale**: `FontResolver.startup_ping()` at line 137 creates `httpx.AsyncClient()` with no arguments. For proxy users, ALL pings fail. The `_ping_hunter()` method then force-trips the circuit breaker by recording `threshold` failures in a loop (lines 131-132). This means a single failed ping permanently disables the hunter for the entire session (60s cooldown, but by then the pipeline is likely done).
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if any(self._is_font_drop(url) for url in urls):
-                event.acceptProposedAction()
-                self.setStyleSheet("QMainWindow { border: 3px solid #4CAF50; }")
-                return
-        event.ignore()
+**Circuit Breaker Analysis** (`src/core/circuit_breaker.py`):
+- States: CLOSED → OPEN (after `threshold` consecutive failures) → HALF_OPEN (after `cooldown_s`) → CLOSED (on success) or OPEN (on failure)
+- Default threshold: 3, default cooldown: 60s
+- The force-trip loop (`for _ in range(threshold): cb.record_failure()`) immediately transitions to OPEN, skipping the natural escalation path
 
-    def dragLeaveEvent(self, event):
-        self.setStyleSheet(self._default_style)
-
-    def dropEvent(self, event: QDropEvent):
-        self.setStyleSheet(self._default_style)
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()]
-        asyncio.ensure_future(self._handle_font_drop(paths))
-
-    def _is_font_drop(self, url) -> bool:
-        path = Path(url.toLocalFile())
-        if path.is_dir():
-            return True
-        return path.suffix.lower() in ('.ttf', '.otf')
-```
-
-**Visual Feedback**: Green border highlight during valid drag-over. Reset on `dragLeaveEvent` and `dropEvent`. Uses `setStyleSheet()` with a solid border — minimal, non-intrusive, clearly visible on dark theme.
+**Fix**: Record only 1 failure per failed ping. If the hunter also fails during actual resolution, the natural 3-failure threshold still trips the breaker. This gives the hunter a fair chance to work even if the ping URL was temporarily unreachable.
 
 **Alternatives Considered**:
-- Overlay widget: More complex, requires z-ordering management.
-- Dedicated drop zone: Smaller target, less discoverable.
-- `QDrag` custom MIME: Over-engineered for filesystem drops.
+- **Remove startup pings entirely**: Rejected — they provide useful early warning about network issues. Just need to be less aggressive.
+- **Add a "soft" circuit breaker state**: Over-engineering. Single failure record achieves the same effect within the existing state machine.
+- **Make ping failure non-counting**: Rejected — pings DO provide signal about network health. One failure should count as one data point.
 
-## 7. Application-Scoped Disk I/O Semaphore
+---
 
-**Decision**: Create a single `asyncio.Semaphore(config.max_concurrent_disk_io)` in `bootstrap_app()` and inject it into both `PipelineRunner` and `FontIngestionService`. `PipelineRunner` stops creating per-run semaphores.
+## Research Task 6: Font Cache Normalization Gap
 
-**Rationale**: Constitution Principle III mandates "application-scoped (singleton lifetime) and injected into adapters via constructor or config, never created per-call." Currently, `PipelineRunner.run()` creates a new semaphore per run (L100) — this is a pre-existing deviation that should be fixed.
+**Decision**: Out of scope for this hotfix. Document as follow-up.
 
-**Impact**:
-1. `PipelineRunner.__init__` gains `disk_semaphore: asyncio.Semaphore` parameter.
-2. `PipelineRunner.run()` uses `self.disk_semaphore` instead of creating new one.
-3. `FontIngestionService.__init__` takes `disk_semaphore: asyncio.Semaphore`.
-4. `bootstrap_app()` creates the semaphore and passes to both.
+**Rationale**: `FontCache.lookup()` at line 111 does `if font_name not in fonts` — a strict exact-match on the raw font name string. This means the cache has the same normalization gap as the hunter. However, fixing the cache is a broader change that affects store/lookup/rebuild semantics and the TOML index format. The immediate hotfix should focus on the hunter layer where fonts are first resolved. Once the SystemFontHunter returns a properly matched `FontAsset`, the cache stores it under the correct name for future lookups.
 
-**Alternatives Considered**:
-- Separate semaphores per service: Doesn't bound total concurrent I/O when pipeline + import run simultaneously.
-- Global module-level semaphore: Forbidden (global mutable state).
-- Config-based lazy creation: Extra complexity, still needs singleton management.
+**Follow-up**: Add normalization to `FontCache.lookup()` in a future iteration, potentially using the same `_strip_style_suffix()` and synonym logic.

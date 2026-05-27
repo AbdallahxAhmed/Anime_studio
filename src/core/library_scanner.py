@@ -6,6 +6,15 @@ from src.models.pipeline import LibraryScanResult, LibraryScanOutput
 logger = structlog.get_logger()
 
 
+def _is_excluded(path: Path, base: Path) -> bool:
+    """Return True if any path component relative to base starts with '.'."""
+    try:
+        relative = path.relative_to(base)
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in relative.parts)
+
+
 async def scan_library(library_path: Path) -> LibraryScanOutput:
     """Scan the library_path for MKV files, matching ASS subtitle siblings, and Fonts directories."""
 
@@ -21,7 +30,10 @@ async def scan_library(library_path: Path) -> LibraryScanOutput:
             return LibraryScanOutput(episodes=results, font_directories=list(font_dirs))
 
         # Find all MKV files recursively, sort them for deterministic order
-        mkv_files = sorted(list(lib_path.rglob("*.mkv")), key=lambda p: p.name)
+        mkv_files = sorted(
+            [p for p in lib_path.rglob("*.mkv") if not _is_excluded(p, lib_path)],
+            key=lambda p: p.name,
+        )
 
         for mkv in mkv_files:
             parent = mkv.parent
@@ -30,7 +42,9 @@ async def scan_library(library_path: Path) -> LibraryScanOutput:
             try:
                 for child in parent.iterdir():
                     if child.is_dir() and child.name.lower() == "fonts":
-                        font_dirs.add(child.resolve())
+                        resolved_child = child.resolve()
+                        if not _is_excluded(resolved_child, lib_path):
+                            font_dirs.add(resolved_child)
             except Exception as e:
                 logger.error(
                     "failed to search for font directories",
