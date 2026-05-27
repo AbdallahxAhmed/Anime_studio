@@ -30,7 +30,9 @@ def _get_system_font_dirs() -> list[Path]:
         ]
 
 
-def _extract_font_names(font_path: Path) -> tuple[str, dict[int, str], set[str]]:
+def _extract_font_names(
+    font_path: Path, font_number: int = 0
+) -> tuple[str, dict[int, str], set[str]]:
     """
     Extract searchable font names and all nameids from a font file.
     Returns: (primary_name, nameids_dict, searchable_names_set)
@@ -40,7 +42,7 @@ def _extract_font_names(font_path: Path) -> tuple[str, dict[int, str], set[str]]
     primary_name = font_path.stem
 
     try:
-        font = TTFont(font_path, fontNumber=0)
+        font = TTFont(font_path, fontNumber=font_number)
         name_table = font["name"]
 
         for name_id in (1, 4, 6, 16):
@@ -66,9 +68,38 @@ def _extract_font_names(font_path: Path) -> tuple[str, dict[int, str], set[str]]
             primary_name = nameids[1]
 
     except Exception as e:
-        logger.debug("Failed to extract font names", path=str(font_path), error=str(e))
+        logger.debug(
+            "Failed to extract font names",
+            path=str(font_path),
+            font_number=font_number,
+            error=str(e),
+        )
 
     return primary_name, nameids, searchable_names
+
+
+FONT_EXTENSIONS = frozenset({".ttf", ".otf", ".ttc"})
+
+STRIP_SUFFIXES = frozenset(
+    {
+        "regular",
+        "normal",
+        "book",
+        "roman",
+        "plain",
+        "standard",
+        "medium",
+        "text",
+        "display",
+    }
+)
+
+WEIGHT_SYNONYMS = {
+    "semibold": {"demibold", "demi bold", "semi bold"},
+    "bold": {"heavy", "black", "dark"},
+    "light": {"thin", "hairline", "ultralight", "extra light", "extralight"},
+    "extrabold": {"ultra bold", "ultrabold", "extra bold"},
+}
 
 
 class SystemFontHunter:
@@ -84,6 +115,35 @@ class SystemFontHunter:
 
     def supports(self, query: FontQuery) -> bool:
         return True
+
+    def _strip_style_suffix(self, name: str) -> str:
+        """Strip trailing style suffixes like 'regular', 'normal', 'book' from the end of a name."""
+        tokens = name.split()
+        while tokens and tokens[-1] in STRIP_SUFFIXES:
+            tokens.pop()
+        return " ".join(tokens)
+
+    def _make_result(
+        self, index_key: str, query: FontQuery, duration_ms: float
+    ) -> HunterResult:
+        path, primary_name, nameids = self._index[index_key]
+        asset = FontAsset(
+            name=primary_name,
+            file_path=path,
+            source="system",
+            layer_found=self.priority,
+            cache_hit=False,
+            nameids=nameids,
+            is_cacheable=False,
+        )
+        return HunterResult(
+            query=query,
+            font_asset=asset,
+            success=True,
+            hunter_name=self.name,
+            duration_ms=duration_ms,
+            attempts=1,
+        )
 
     def _build_index(self) -> None:
         """Scan system directories and index all valid fonts."""
@@ -103,15 +163,69 @@ class SystemFontHunter:
 
             try:
                 for p in d.rglob("*"):
-                    if p.is_file() and p.suffix.lower() in (".ttf", ".otf"):
-                        primary_name, nameids, searchable_names = _extract_font_names(p)
-                        if not searchable_names:
-                            continue
+                    if p.is_file() and p.suffix.lower() in FONT_EXTENSIONS:
+                        if p.suffix.lower() == ".ttc":
+                            try:
+                                from fontTools.ttLib import TTCollection
 
-                        for s_name in searchable_names:
-                            if s_name not in self._index:
-                                self._index[s_name] = (p, primary_name, nameids)
-                        indexed_count += 1
+                                collection = TTCollection(str(p))
+                                num_fonts = len(collection.fonts)
+                                collection.close()
+                            except Exception:
+                                num_fonts = 1
+
+                            for i in range(num_fonts):
+                                try:
+                                    primary_name, nameids, searchable_names = (
+                                        _extract_font_names(p, font_number=i)
+                                    )
+                                    if searchable_names:
+                                        for s_name in searchable_names:
+                                            if s_name not in self._index:
+                                                self._index[s_name] = (
+                                                    p,
+                                                    primary_name,
+                                                    nameids,
+                                                )
+                                            # T029: Also index a version with style suffix stripped
+                                            stripped = self._strip_style_suffix(s_name)
+                                            if (
+                                                stripped != s_name
+                                                and stripped not in self._index
+                                            ):
+                                                self._index[stripped] = (
+                                                    p,
+                                                    primary_name,
+                                                    nameids,
+                                                )
+                                        indexed_count += 1
+                                except Exception as e:
+                                    logger.debug(
+                                        "Failed to extract TTC font",
+                                        path=str(p),
+                                        font_number=i,
+                                        error=str(e),
+                                    )
+                        else:
+                            primary_name, nameids, searchable_names = (
+                                _extract_font_names(p)
+                            )
+                            if searchable_names:
+                                for s_name in searchable_names:
+                                    if s_name not in self._index:
+                                        self._index[s_name] = (p, primary_name, nameids)
+                                    # T029: Also index a version with style suffix stripped
+                                    stripped = self._strip_style_suffix(s_name)
+                                    if (
+                                        stripped != s_name
+                                        and stripped not in self._index
+                                    ):
+                                        self._index[stripped] = (
+                                            p,
+                                            primary_name,
+                                            nameids,
+                                        )
+                                indexed_count += 1
             except Exception as e:
                 logger.warning(
                     "Error scanning system font directory",
@@ -128,43 +242,67 @@ class SystemFontHunter:
         self._index_built = True
 
     async def search(self, query: FontQuery) -> list[HunterResult]:
-        """Search system fonts for a match (case-insensitive)."""
+        """Search system fonts for a match with progressive normalization tiers."""
         if not self._index_built:
             await asyncio.to_thread(self._build_index)
 
         requested = query.requested_name.strip().lower()
-
         start_time = time.perf_counter()
 
+        # 1. Exact match (existing behavior, fast path)
         if requested in self._index:
-            path, primary_name, nameids = self._index[requested]
             duration_ms = (time.perf_counter() - start_time) * 1000.0
-
-            asset = FontAsset(
-                name=primary_name,
-                file_path=path,
-                source="system",
-                layer_found=self.priority,
-                cache_hit=False,
-                nameids=nameids,
-                is_cacheable=False,
-            )
-
-            result = HunterResult(
-                query=query,
-                font_asset=asset,
-                success=True,
-                hunter_name=self.name,
-                duration_ms=duration_ms,
-                attempts=1,
-            )
+            result = self._make_result(requested, query, duration_ms)
             logger.info(
-                "System font match found",
+                "System font match found (tier 1: exact)",
                 requested_name=query.requested_name,
-                matched_name=primary_name,
-                path=str(path),
+                matched_name=result.font_asset.name,
+                path=str(result.font_asset.file_path),
             )
             return [result]
+
+        # 2. Strip trailing style suffixes
+        normalized = self._strip_style_suffix(requested)
+        if normalized != requested and normalized in self._index:
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            result = self._make_result(normalized, query, duration_ms)
+            logger.info(
+                "System font match found (tier 2: stripped suffix)",
+                requested_name=query.requested_name,
+                matched_name=result.font_asset.name,
+                path=str(result.font_asset.file_path),
+            )
+            return [result]
+
+        # 3. Try appending common suffixes if requested name is a bare family
+        for suffix in STRIP_SUFFIXES:
+            candidate = f"{requested} {suffix}"
+            if candidate in self._index:
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                result = self._make_result(candidate, query, duration_ms)
+                logger.info(
+                    "System font match found (tier 3: appended suffix)",
+                    requested_name=query.requested_name,
+                    matched_name=result.font_asset.name,
+                    path=str(result.font_asset.file_path),
+                )
+                return [result]
+
+        # 4. Weight synonym expansion
+        for canonical, synonyms in WEIGHT_SYNONYMS.items():
+            for syn in synonyms:
+                if syn in requested:
+                    candidate = requested.replace(syn, canonical)
+                    if candidate in self._index:
+                        duration_ms = (time.perf_counter() - start_time) * 1000.0
+                        result = self._make_result(candidate, query, duration_ms)
+                        logger.info(
+                            "System font match found (tier 4: weight synonym)",
+                            requested_name=query.requested_name,
+                            matched_name=result.font_asset.name,
+                            path=str(result.font_asset.file_path),
+                        )
+                        return [result]
 
         duration_ms = (time.perf_counter() - start_time) * 1000.0
         logger.info("System font miss", requested_name=query.requested_name)

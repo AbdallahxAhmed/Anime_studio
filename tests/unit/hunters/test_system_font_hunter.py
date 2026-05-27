@@ -140,3 +140,104 @@ async def test_system_font_hunter_download_not_implemented():
     )
     with pytest.raises(NotImplementedError):
         await hunter.download(result)
+
+
+@pytest.mark.anyio
+async def test_system_font_hunter_normalization_tiers():
+    hunter = SystemFontHunter()
+    # Seed mock index
+    hunter._index = {
+        "arial": (Path("arial.ttf"), "Arial", {1: "Arial"}),
+        "segoe ui semibold": (
+            Path("segoe_sb.ttf"),
+            "Segoe UI Semibold",
+            {1: "Segoe UI Semibold"},
+        ),
+        "somefont regular": (
+            Path("somefont_reg.ttf"),
+            "SomeFont Regular",
+            {1: "SomeFont Regular"},
+        ),
+    }
+    hunter._index_built = True
+
+    # T017: Exact match (fast path)
+    q1 = FontQuery(
+        requested_name="Arial", anime_title="Test", episode_path=Path("ep1.mkv")
+    )
+    r1 = await hunter.search(q1)
+    assert len(r1) == 1
+    assert r1[0].success is True
+    assert r1[0].font_asset.name == "Arial"
+
+    # T018: Suffix stripping (query has suffix, index has bare)
+    q2 = FontQuery(
+        requested_name="Arial Regular", anime_title="Test", episode_path=Path("ep1.mkv")
+    )
+    r2 = await hunter.search(q2)
+    assert len(r2) == 1
+    assert r2[0].success is True
+    assert r2[0].font_asset.name == "Arial"
+
+    # T019: Suffix appending (query has bare, index has suffix)
+    q3 = FontQuery(
+        requested_name="somefont", anime_title="Test", episode_path=Path("ep1.mkv")
+    )
+    r3 = await hunter.search(q3)
+    assert len(r3) == 1
+    assert r3[0].success is True
+    assert r3[0].font_asset.name == "SomeFont Regular"
+
+    # T020: Weight synonym expansion
+    q4 = FontQuery(
+        requested_name="Segoe UI Demi Bold",
+        anime_title="Test",
+        episode_path=Path("ep1.mkv"),
+    )
+    r4 = await hunter.search(q4)
+    assert len(r4) == 1
+    assert r4[0].success is True
+    assert r4[0].font_asset.name == "Segoe UI Semibold"
+
+    # T022: No false positives
+    q5 = FontQuery(
+        requested_name="Times New Roman",
+        anime_title="Test",
+        episode_path=Path("ep1.mkv"),
+    )
+    r5 = await hunter.search(q5)
+    assert len(r5) == 0
+
+
+def test_system_font_hunter_ttc(tmp_path):
+    from unittest.mock import MagicMock
+
+    hunter = SystemFontHunter()
+
+    with patch("src.hunters.system_font_hunter._get_system_font_dirs") as mock_dirs:
+        mock_dirs.return_value = [tmp_path]
+
+        # Create mock ttc file
+        ttc_file = tmp_path / "testfonts.ttc"
+        ttc_file.touch()
+
+        # Mock TTCollection with 2 fonts
+        mock_collection = MagicMock()
+        mock_collection.fonts = [MagicMock(), MagicMock()]
+
+        with (
+            patch("fontTools.ttLib.TTCollection", return_value=mock_collection),
+            patch("src.hunters.system_font_hunter._extract_font_names") as mock_extract,
+        ):
+            mock_extract.side_effect = [
+                ("FontOne", {1: "FontOne"}, {"fontone"}),
+                ("FontTwo", {1: "FontTwo"}, {"fonttwo"}),
+            ]
+
+            hunter._build_index()
+
+            # Verify both fonts are indexed
+            assert "fontone" in hunter._index
+            assert "fonttwo" in hunter._index
+            assert hunter._index["fontone"][1] == "FontOne"
+            assert hunter._index["fonttwo"][1] == "FontTwo"
