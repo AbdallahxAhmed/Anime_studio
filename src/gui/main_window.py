@@ -1,6 +1,8 @@
+import importlib
 import logging
 from typing import Any
 from pathlib import Path
+from qasync import asyncSlot
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -105,6 +107,7 @@ class MainWindow(QMainWindow):
 
         # Connect SignalBridge slots to corresponding widgets
         self.signal_bridge.log_received.connect(self.activity_feed.add_entry)
+        self.signal_bridge.log_received.connect(self._on_log_received)
         self.signal_bridge.progress_updated.connect(self.progress_panel.update_state)
         self.signal_bridge.pipeline_finished.connect(self.results_table.populate)
         self.signal_bridge.result_added.connect(self.results_table.add_episode_result)
@@ -112,14 +115,137 @@ class MainWindow(QMainWindow):
         # Wire library picker selection event to path handler
         self.library_picker.library_selected.connect(self._on_library_selected)
 
+        # Wire run button click
+        self.run_button.clicked.connect(self._on_run_click)
+
         logger.info("MainWindow initialized and signal bridge wired")
 
     def _on_library_selected(self, path: str) -> None:
         """Handle library folder selection by updating configuration and UI state."""
-        self.config.library_path = Path(path)
-        self.config.save_to_toml()
-        self.run_button.setEnabled(True)
-        logger.info(f"Library path configured and saved: {path}")
+        p = Path(path)
+        if p.is_dir():
+            self.config.library_path = p
+            self.config.save_to_toml()
+            self.run_button.setEnabled(True)
+            logger.info(f"Library path configured and saved: {path}")
+        else:
+            self.run_button.setEnabled(False)
+            logger.warning(f"Inaccessible library path selected: {path}")
+
+    @asyncSlot()
+    async def _on_run_click(self) -> None:
+        """Trigger the forensics pipeline runner asynchronously without blocking the UI thread."""
+        library_path = self.library_picker.get_path()
+        if not library_path:
+            QMessageBox.warning(
+                self,
+                "No Library Selected",
+                "Please select an anime library directory first.",
+            )
+            return
+
+        p = Path(library_path)
+        if not p.is_dir():
+            QMessageBox.critical(
+                self, "Invalid Path", "Selected path is not a valid directory."
+            )
+            return
+
+        # Lock UI controls during active pipeline run
+        self._pipeline_running = True
+        self.run_button.setEnabled(False)
+        self.library_picker.setEnabled(False)
+        self.results_table.clear_results()
+
+        from src.gui.messages import ProgressStage, ProgressState
+        from src.gui.bootstrap import map_pipeline_report
+
+        pipeline_mod = importlib.import_module("src.models.pipeline")
+        PipelineConfig = pipeline_mod.PipelineConfig
+
+        # Initial state update
+        self.signal_bridge.progress_updated.emit(
+            ProgressState(
+                stage=ProgressStage.SCANNING,
+                status_text="Initiating library analysis...",
+            )
+        )
+
+        try:
+            config = PipelineConfig(
+                library_path=p,
+                dry_run=self.config.dry_run
+                if hasattr(self.config, "dry_run")
+                else False,
+                sync_enabled=True,
+            )
+
+            # Await the core runner's run method asynchronously on the qasync event loop
+            report = await self.pipeline_runner.run(config)
+
+            # Map domain report to UI result structures
+            run_result = map_pipeline_report(report, p, config.dry_run)
+            self.signal_bridge.pipeline_finished.emit(run_result)
+
+            # Emit final success state
+            self.signal_bridge.progress_updated.emit(
+                ProgressState(
+                    stage=ProgressStage.COMPLETE,
+                    status_text="Pipeline executed successfully!",
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Forensics pipeline execution failed: {e}")
+            self.signal_bridge.progress_updated.emit(
+                ProgressState(
+                    stage=ProgressStage.ERROR, status_text=f"Pipeline failed: {e}"
+                )
+            )
+            self.signal_bridge.pipeline_error.emit(str(e))
+
+            # Display critical error modal
+            from src.gui.messages import ErrorInfo
+            from src.gui.widgets.error_dialog import show_error_dialog
+
+            err_info = ErrorInfo(
+                message="Critical error occurred during pipeline run.",
+                detail=str(e),
+                is_critical=True,
+            )
+            show_error_dialog(self, err_info)
+
+        finally:
+            self._pipeline_running = False
+            self.run_button.setEnabled(True)
+            self.library_picker.setEnabled(True)
+
+    def _on_log_received(self, log_entry: dict) -> None:
+        """Slot to intercept structured log entries and map them to progress updates."""
+        stage_val = log_entry.get("stage")
+        if stage_val:
+            current = log_entry.get("progress_current")
+            total = log_entry.get("progress_total")
+            event_msg = log_entry.get("event", "")
+
+            from src.gui.messages import ProgressStage, ProgressState
+
+            if stage_val == "scan":
+                state = ProgressState(
+                    stage=ProgressStage.SCANNING,
+                    current=current,
+                    total=total,
+                    status_text=event_msg,
+                )
+                self.signal_bridge.progress_updated.emit(state)
+            elif stage_val == "mux":
+                state = ProgressState(
+                    stage=ProgressStage.MUXING,
+                    current=current,
+                    total=total,
+                    status_text=event_msg,
+                )
+                self.signal_bridge.progress_updated.emit(state)
 
     def closeEvent(self, event: Any) -> None:
         """Override close event to confirm exit if pipeline is active."""
