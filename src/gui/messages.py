@@ -42,3 +42,19 @@ class ErrorInfo:
     message: str
     detail: str | None = None
     is_critical: bool = False
+
+
+class ProgressStage(Enum):
+    IDLE = "idle"
+    SCANNING = "scanning"
+    MUXING = "muxing"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+@dataclass
+class ProgressState:
+    stage: ProgressStage
+    current: int | None = None
+    total: int | None = None
+    status_text: str = ""
