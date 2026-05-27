@@ -61,3 +61,21 @@ def test_app_config_load_from_toml_missing_file():
     config = AppConfig.load_from_toml(Path("non_existent_file.toml"))
     assert config.circuit_breaker_cooldown_s == 60.0
     assert config.font_cache_path is None
+    assert config.library_path is None
+
+
+def test_app_config_save_to_toml(tmp_path):
+    toml_file = tmp_path / "config.toml"
+    config = AppConfig(
+        proxy="socks5://localhost:1080",
+        max_concurrent_disk_io=5,
+        library_path=Path("D:\\Anime")
+    )
+    config.save_to_toml(toml_file)
+
+    # Reload from TOML and check values
+    reloaded = AppConfig.load_from_toml(toml_file)
+    assert reloaded.proxy == "socks5://localhost:1080"
+    assert reloaded.max_concurrent_disk_io == 5
+    assert reloaded.library_path == Path("D:\\Anime")
+

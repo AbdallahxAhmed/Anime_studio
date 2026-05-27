@@ -2,76 +2,53 @@
   ============================================================================
   SYNC IMPACT REPORT
   ============================================================================
-  Version change: 1.1.0 → 1.5.0 (4 MINOR bumps combined)
+  Version change: 1.6.0 → 1.7.0 (MINOR — presentation layer technology swap)
 
   Amended principles:
+    I.   Separation of Concerns — Hexagonal Architecture
+         - Presentation layer: Flet GUI → PySide6 GUI
+         - "Flet async event handlers" → "PySide6 slots + qasync bridge"
     III. Async-First I/O
-         + Disk I/O Protection: asyncio.Semaphore for bulk mux/extract
-           (max 3 concurrent) to prevent disk thrashing (v1.5.0)
-         + Network Proxying: httpx.AsyncClient MUST accept proxy settings
-           from config.toml (v1.5.0)
-    V.   Plugin Registry Architecture
-         + Circuit Breaker & Rate Limiting mandate for HunterProtocol
-    VI.  Data Safety & Non-Destructive Operations
-         + Silent Auto-Cleanup: .anime_studio_trash/ managed by background
-           task, deletes files >30 days old without user prompts (v1.5.0)
-    VIII. Encoding Guarantees
-         + Arabic Heuristic Fallback: if charset-normalizer detects cp1252
-           but output lacks standard English / contains gibberish, fallback
-           to Windows-1256 (cp1256) for legacy Arabic fansubs (v1.5.0)
+         - Flet `page.run_task()` → `qasync` event loop integration
+         - Single asyncio event loop bridged via `qasync.QEventLoop`
+    IV.  Structured Error Handling
+         - Flet SnackBar/AlertDialog → Qt QMessageBox (information/warning/critical)
     IX.  Observability & Structured Logging
-         + Cache Versioning mandate for persistent cache files
+         - "Flet ProgressBar/ProgressRing" → "QProgressBar"
+    XI.  Dependency Isolation
+         - Removed `flet` from approved deps
+         - Added `PySide6`, `qasync`, `qdarktheme`
+    XII. Simplicity & YAGNI
+         - No changes (already generic enough)
 
-  Added sections:
-    X-bis. Pipeline Report Generation (new principle, v1.1.0)
-    XIII.  Distribution & External Dependencies (new principle, v1.2.0)
-           + Tool Discovery Order (Windows-first, 5-step)
-           + Binary classification (CRITICAL / OPTIONAL / ALWAYS AVAILABLE)
-           + Distribution via install.ps1 + run.bat/run.ps1
-           + mpv-config independence mandate (v1.3.0)
-           + sub-fonts-dir FORBIDDEN, MKV muxing only (v1.3.0)
-           + Storage layout: volatile C: + permanent D: (v1.4.0)
+  Updated sections:
+    - Technology Stack table: Flet → PySide6 + qasync + qdarktheme
+    - Forbidden Patterns table: added `flet` to banned list
+    - Commit Convention scopes: gui (unchanged)
+    - File Organization: src/gui/ (unchanged, now PySide6-powered)
 
   Removed sections: none
 
   Templates requiring updates:
-    ✅ plan-template.md      — Constitution Check now covers III (disk I/O
-                               protection, network proxying), V (circuit
-                               breaker), VI (auto-cleanup), VIII (Arabic
-                               fallback), IX (cache versioning), X-bis
-                               (report generation), XIII (distribution)
+    ✅ plan-template.md      — No structural change needed (generic)
     ✅ spec-template.md      — No update needed
-    ✅ tasks-template.md     — Tool discovery + storage layout may spawn
-                               new task types; no structural template change
+    ✅ tasks-template.md     — No structural change needed
     ✅ checklist-template.md — No update needed
 
   Migration notes:
-    - HunterProtocol implementations MUST add `rate_limit` and
-      `circuit_breaker_threshold` fields
-    - `src/config.py` MUST define `CACHE_VERSION` constant
-    - Pipeline runner MUST produce `_AnimeStudio_Report.md`
-    - Tool discovery MUST follow 5-step Windows-first order
-    - Storage paths: %APPDATA% for config, D:\Entertainment for data
-    - mpv-config MUST NOT be depended on or modified
-    - sub-fonts-dir usage is FORBIDDEN
-    - font_cache on D: is self-describing, no config dependency
-    - Bulk mux/extract adapters MUST acquire `disk_io_semaphore`
-      (asyncio.Semaphore(3)) before launching subprocess
-    - httpx.AsyncClient instantiation MUST read `proxy` from config.toml
-    - .anime_studio_trash/ cleanup task MUST run on app startup
-    - Encoding pipeline MUST implement cp1252→cp1256 Arabic heuristic
+    - `flet` MUST be removed from pyproject.toml / requirements
+    - `PySide6`, `qasync`, `qdarktheme` MUST be added
+    - Entry point in `__main__.py` MUST launch QApplication, not Flet app
+    - `app.py` MUST be rewritten for QMainWindow-based setup
+    - `page.run_task()` calls MUST be replaced with `qasync` coroutine
+      scheduling or signal/slot bridging to asyncio
+    - Flet widget references MUST be replaced with Qt widget equivalents
 
   Follow-up TODOs:
-    - Update HunterProtocol definition in src/ports/font_hunter.py
-    - Add CACHE_VERSION to src/config.py
-    - Implement report generation in pipeline runner
-    - Implement 5-step tool discovery in src/adapters/
-    - Create install.ps1 and run.bat/run.ps1
-    - Implement storage layout with C:/D: split
-    - Add disk_io_semaphore to src/config.py or adapter base
-    - Add proxy config field to BaseSettings in src/config.py
-    - Implement trash auto-cleanup background task
-    - Implement Arabic heuristic fallback in src/core/encoding.py
+    - Rewrite src/gui/ for PySide6
+    - Update pyproject.toml dependency list
+    - Update __main__.py entry point
+    - Update all existing tests referencing gui module
   ============================================================================
 -->
 
@@ -93,7 +70,7 @@ five bounded domains:
 2. **Core Forensics** (`src/core/`): Stateless, async service functions
    that implement business logic — subtitle syncing, font matching, ASS
    repair, mux planning. Core services accept and return Domain Models.
-   They MUST NOT import from the TUI, CLI, or Hunter layers.
+   They MUST NOT import from the GUI, CLI, or Hunter layers.
 3. **Hunter Registry** (`src/hunters/`): A plugin-based registry of font
    acquisition sources (web scrapers, API clients). Each hunter implements
    a `HunterProtocol` and is discovered at runtime via entry-points or
@@ -103,14 +80,15 @@ five bounded domains:
    operations — subprocess calls (`ffmpeg`, `mkvmerge`, `alass`,
    `ffsubsync`, `ots-sanitize`), filesystem access, network I/O via
    `httpx`. Adapters implement port interfaces defined in `src/ports/`.
-5. **Presentation** (`src/tui/`): The Textual TUI application. The TUI
-   layer MUST be a pure consumer of Core services via message-passing and
-   async workers. It MUST NOT contain business logic, subprocess calls, or
-   direct filesystem manipulation.
+5. **Presentation** (`src/gui/`): The PySide6 (Qt for Python) GUI
+   application. The GUI layer MUST be a pure consumer of Core services
+   via PySide6 signals/slots and `qasync`-bridged asyncio coroutines.
+   It MUST NOT contain business logic, subprocess calls, or direct
+   filesystem manipulation.
 
 **Rationale**: Enforcing these boundaries guarantees that forensic engines
-can be tested without a running TUI, hunters can be developed in isolation,
-and the TUI can be replaced (e.g., with a web frontend) without touching
+can be tested without a running GUI, hunters can be developed in isolation,
+and the GUI can be replaced (e.g., with a web frontend) without touching
 core logic.
 
 ### II. Cross-Platform & Windows-First Compatibility
@@ -135,9 +113,9 @@ NON-NEGOTIABLE:
 - **Temp Directories**: Use `tempfile.mkdtemp()` or
   `tempfile.TemporaryDirectory()` instead of hardcoded `/tmp` or
   `%TEMP%` paths.
-- **Console Output**: Never assume ANSI escape code support. The Textual
-  framework handles terminal capability detection. Direct `print()`
-  with ANSI codes outside the TUI is FORBIDDEN.
+- **Console Output**: Never assume ANSI escape code support. PySide6
+  renders its own native window. Direct `print()` with ANSI codes
+  outside logging is FORBIDDEN.
 
 ### III. Async-First I/O
 
@@ -162,7 +140,7 @@ froze the UI is FORBIDDEN.
 - **Filesystem**: For large file operations (reading MKV metadata, bulk
   font scanning), use `asyncio.to_thread()` to offload blocking calls.
   Small metadata reads (`Path.stat()`, `Path.exists()`) MAY remain
-  synchronous when called outside the TUI event loop.
+  synchronous when called outside the GUI event loop.
 - **Disk I/O Protection**: Bulk muxing and extraction operations (any
   adapter calling `mkvmerge`, `mkvextract`, or `ffmpeg` for file-level
   I/O) MUST acquire a shared `asyncio.Semaphore` before launching the
@@ -172,9 +150,10 @@ froze the UI is FORBIDDEN.
   application-scoped (singleton lifetime) and injected into adapters via
   constructor or config, never created per-call.
 - **Concurrency Model**: The application MUST use a single `asyncio` event
-  loop. Textual's built-in worker system (`self.run_worker()`) MUST be
-  used for background tasks within the TUI. Manual thread creation is
-  FORBIDDEN unless wrapping a fundamentally blocking C library.
+  loop bridged to the Qt event loop via `qasync.QEventLoop`. This allows
+  PySide6 widgets and asyncio coroutines to coexist on one thread. Manual
+  thread creation is FORBIDDEN unless wrapping a fundamentally blocking
+  C library.
 
 ### IV. Structured Error Handling & Actionable Failures
 
@@ -201,8 +180,10 @@ translated into a structured, actionable error.
   converted to `ToolResult` or domain-specific errors. Core services MUST
   raise domain exceptions, never `OSError`, `httpx.HTTPError`, or
   `subprocess.CalledProcessError` directly.
-- **TUI Contract**: The TUI MUST present errors via styled notification
-  widgets (Textual `Notify` / modal dialogs), never via `stderr` dumps.
+- **GUI Contract**: The GUI MUST present errors via Qt's `QMessageBox`
+  (`QMessageBox.information` for non-critical, `QMessageBox.warning` for
+  warnings, `QMessageBox.critical` for critical/modal errors). Raw
+  `stderr` dumps to the user are FORBIDDEN.
 
 ### V. Plugin Registry Architecture
 
@@ -350,7 +331,7 @@ to end users.
     encoding issue
   - `ERROR`: Operation failed, tool crashed, unrecoverable error
 - **Log Destination**: Logs MUST be written to a rotating file
-  (`~/.anime_studio/logs/`). The TUI MUST NOT display raw log lines;
+  (`~/.anime_studio/logs/`). The GUI MUST NOT display raw log lines;
   instead, it MUST surface a curated activity feed derived from `INFO`+
   events.
 - **Cache Versioning**: Any persistent cache file written by
@@ -360,8 +341,8 @@ to end users.
   deleted and rebuilt from scratch. Silent reads of stale cache
   are FORBIDDEN.
 - **Operation Tracking**: Long-running operations (muxing, bulk font
-  search) MUST emit progress events that the TUI can render as progress
-  bars or spinners.
+  search) MUST emit progress events that the GUI can render as
+  `QProgressBar` widgets.
 
 ### X-bis. Pipeline Report Generation
 
@@ -407,7 +388,9 @@ The dependency tree MUST be minimal, audited, and pinned.
   `requirements.lock` (or `uv.lock`). Unpinned dependencies are
   FORBIDDEN in production.
 - **Core Dependencies** (approved):
-  - `textual` — TUI framework
+  - `PySide6` — Qt for Python GUI framework (native widgets, stable API)
+  - `qasync` — asyncio ↔ Qt event loop bridge
+  - `qdarktheme` — modern dark theme for Qt applications
   - `httpx` — async HTTP client
   - `pydantic` — data validation and settings
   - `fonttools` — font introspection and repair
@@ -507,7 +490,9 @@ Cache is self-describing — no config needed to find it.
 | Component           | Technology                     | Rationale                                          |
 |---------------------|--------------------------------|----------------------------------------------------|
 | Language            | Python 3.11+                   | `asyncio.TaskGroup`, `tomllib`, `match` statements |
-| TUI Framework       | Textual 1.x                   | Async-native, CSS styling, Nerd Font support       |
+| GUI Framework       | PySide6 (Qt for Python)        | Native widgets, stable API, cross-platform         |
+| Async ↔ Qt Bridge   | qasync                         | Bridges asyncio event loop with Qt event loop      |
+| GUI Theming         | qdarktheme                     | Modern dark theme for Qt, zero-config              |
 | HTTP Client         | httpx (async)                  | HTTP/2, connection pooling, timeout control        |
 | Data Validation     | Pydantic v2                    | Performance, JSON Schema export, settings mgmt     |
 | Font Introspection  | fontTools                      | Industry standard for OpenType/TrueType parsing    |
@@ -532,13 +517,14 @@ code review:
 | `subprocess.run()` (blocking)        | `asyncio.create_subprocess_exec()`                 |
 | `open()` without `encoding=`        | `open(encoding="utf-8")` (or explicit encoding)   |
 | Hardcoded dicts for extensible sets  | Registry / Plugin pattern                          |
-| `print()` for user output            | Textual widgets / `structlog` for logs             |
+| `print()` for user output            | PySide6 widgets / `structlog` for logs             |
 | Bare `except:` or `except Exception` | Specific exception types + `ToolResult` wrapping   |
 | `os.system()`                        | `asyncio.create_subprocess_exec()`                 |
 | Global mutable state                 | Dependency injection via constructor / config      |
 | `time.sleep()` in async code         | `asyncio.sleep()`                                  |
 | Hardcoded `.exe` in binary names     | `shutil.which()` resolution                        |
-| `curses` or direct `rich` usage      | Textual TUI framework exclusively                  |
+| `curses` / `rich` / `textual` usage  | PySide6 GUI framework exclusively                  |
+| `flet` usage                         | PySide6 GUI framework exclusively                  |
 | `sys.exit()` in library code         | Raise domain exception; only CLI entry point exits |
 | Hardcoded proxy URLs                 | `config.toml` `proxy` field via `BaseSettings`     |
 
@@ -558,7 +544,7 @@ All commits MUST follow Conventional Commits format:
 <type>(<scope>): <description>
 
 Types: feat, fix, refactor, test, docs, chore, ci
-Scopes: core, tui, hunters, adapters, models, config
+Scopes: core, gui, hunters, adapters, models, config
 ```
 
 ### Code Quality Gates
@@ -578,7 +564,7 @@ anime_studio/
 ├── src/
 │   ├── __init__.py
 │   ├── __main__.py          # Entry point
-│   ├── app.py               # Textual App subclass
+│   ├── app.py               # QApplication + QMainWindow setup
 │   ├── config.py            # Pydantic BaseSettings
 │   ├── errors.py            # Exception taxonomy
 │   ├── models/              # Pure data models (Pydantic)
@@ -610,10 +596,10 @@ anime_studio/
 │   │       ├── google_fonts.py
 │   │       ├── dafont.py
 │   │       └── ...
-│   └── tui/                 # Textual UI components
-│       ├── screens/
+│   └── gui/                 # PySide6 GUI components
+│       ├── main_window.py
 │       ├── widgets/
-│       └── styles/
+│       └── theme.py
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -648,4 +634,4 @@ comments, and verbal agreements.
 - **Guidance File**: For runtime development guidance and quick-reference
   rules, consult `AGENTS.md` at the repository root.
 
-**Version**: 1.5.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-26
+**Version**: 1.7.0 | **Ratified**: 2026-05-17 | **Last Amended**: 2026-05-26

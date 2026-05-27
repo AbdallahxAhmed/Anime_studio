@@ -16,6 +16,41 @@ class AppConfig(BaseModel):
     circuit_breaker_cooldown_s: float = Field(default=60.0, ge=0.0)
     font_cache_path: Path | None = None
     startup_ping_timeout_s: float = Field(default=2.0, ge=0.0)
+    library_path: Path | None = None
+
+    def save_to_toml(self, file_path: Path | str | None = None) -> None:
+        """Save config parameters to TOML file."""
+        if file_path is None:
+            if sys.platform == "win32":
+                app_data = os.environ.get("APPDATA")
+                if app_data:
+                    base_path = Path(app_data) / "AnimeStudio"
+                else:
+                    base_path = Path.home() / "AppData" / "Roaming" / "AnimeStudio"
+            else:
+                base_path = Path.home() / ".config" / "AnimeStudio"
+
+            file_path = base_path / "config.toml"
+
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = ["[app]"]
+        # Use model_dump() for pydantic v2 compatible dict dump
+        for key, value in self.model_dump().items():
+            if value is None:
+                continue
+            if isinstance(value, Path):
+                val_str = str(value).replace("\\", "/")
+                lines.append(f'{key} = "{val_str}"')
+            elif isinstance(value, str):
+                lines.append(f'{key} = "{value}"')
+            elif isinstance(value, bool):
+                lines.append(f'{key} = {str(value).lower()}')
+            else:
+                lines.append(f'{key} = {value}')
+
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     @classmethod
     def load_from_toml(cls, file_path: Path | str | None = None) -> "AppConfig":
