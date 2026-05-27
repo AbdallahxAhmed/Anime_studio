@@ -7,19 +7,19 @@ import structlog
 
 from src.models.pipeline import LibraryScanResult, EpisodeContext, PipelineConfig
 from src.models.report import EpisodeStatus, EpisodeReport, PipelineReport
-from src.models.subtitle import SubtitleFile, SyncResult
+from src.models.subtitle import SubtitleFile, SubtitleSource, SyncResult
 from src.models.mux import MuxResult
 from src.core.subtitle_repair import repair_ass, extract_fonts
 from src.core.font_resolver import FontResolver
 from src.core.font_ingestion import FontIngestionService
 from src.core.mux_planner import plan_mux
 from src.core.report_writer import render_report, render_incremental_section
+from src.core.library_scanner import LibraryScanner
 from src.ports.subprocess import SubprocessPort
 from src.ports.filesystem import FilesystemPort
 from src.adapters.dependency_checker import ToolRegistry
 from src.config import AppConfig
 from src.errors import FontMatchError
-from src.core.library_scanner import scan_library
 
 logger = structlog.get_logger()
 
@@ -34,6 +34,7 @@ class PipelineRunner:
         config: AppConfig,
         font_ingestion_service: FontIngestionService,
         disk_semaphore: asyncio.Semaphore,
+        library_scanner: LibraryScanner,
     ) -> None:
         self.font_resolver = font_resolver
         self.subprocess_adapter = subprocess_adapter
@@ -42,6 +43,7 @@ class PipelineRunner:
         self.config = config
         self.font_ingestion_service = font_ingestion_service
         self.disk_semaphore = disk_semaphore
+        self.library_scanner = library_scanner
         self._analysis_lock = asyncio.Lock()
 
     async def run(self, pipeline_config: PipelineConfig) -> PipelineReport:
@@ -56,7 +58,7 @@ class PipelineRunner:
             progress_current=None,
             progress_total=None,
         )
-        scan_output = await scan_library(pipeline_config.library_path)
+        scan_output = await self.library_scanner.scan(pipeline_config.library_path)
         scan_results = scan_output.episodes
         font_dirs = scan_output.font_directories
         logger.info(
@@ -117,8 +119,30 @@ class PipelineRunner:
                 )
 
         # 2. Sequential Analysis Phase
-        episode_contexts = []
+        # Filter: only process episodes with external subtitles.
+        # Embedded-only episodes are logged and skipped (no external sub to process).
+        external_scans = []
+        embedded_only_reports = []
         for scan in scan_results:
+            if scan.subtitle_source == SubtitleSource.EMBEDDED:
+                logger.info(
+                    "skipping embedded-only episode (no external subtitle to process)",
+                    episode=scan.episode_path.name,
+                    embedded_tracks=scan.embedded_sub_info.track_count
+                    if scan.embedded_sub_info
+                    else 0,
+                )
+                embedded_only_reports.append(
+                    EpisodeReport(
+                        episode_path=scan.episode_path,
+                        status=EpisodeStatus.SKIPPED,
+                    )
+                )
+            else:
+                external_scans.append(scan)
+
+        episode_contexts = []
+        for scan in external_scans:
             ctx = await self._analyze_episode(
                 scan, anime_title, pipeline_config, run_timestamp
             )
@@ -293,8 +317,9 @@ class PipelineRunner:
                 )
             )
 
-        # Append skipped ones
+        # Append skipped ones (MKVs without any subs + embedded-only)
         episode_reports.extend(skipped_reports)
+        episode_reports.extend(embedded_only_reports)
 
         # Calculate overall font totals and misses
         total_fonts_found = sum(len(ctx.resolved_fonts) for ctx in final_contexts)

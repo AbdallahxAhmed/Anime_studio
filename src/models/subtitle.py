@@ -13,6 +13,13 @@ class AssetLifecycle(str, Enum):
     TRASHED = "TRASHED"
 
 
+class SubtitleSource(str, Enum):
+    """Where the subtitle track originates from."""
+
+    EXTERNAL = "EXTERNAL"  # Sibling .ass file on disk
+    EMBEDDED = "EMBEDDED"  # ASS track inside the MKV container
+
+
 class SubtitleFile(BaseModel):
     model_config = ConfigDict(frozen=True)
 

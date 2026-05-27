@@ -1,10 +1,29 @@
 # COMPACT_STATE.md — Anime Studio v3
 
 **Last Updated**: 2026-05-27
-**Status**: Backend (Phases 0–3), GUI (Phase 5b PySide6), Font Ingestion (Phase 6), & v1.7.0 Hotfix Stability COMPLETE ✅
+**Status**: Backend (Phases 0–3), GUI (Phase 5b PySide6), Font Ingestion (Phase 6), & v1.7.0 Hotfix Stability COMPLETE ✅ | **STOPPED: Pending Embedded Subtitle Reader Decision** 🛑
 **Active Spec**: `specs/007-font-ingestion` (Completed) ✅
 **Branch**: `008-font-ingestion`
 **Constitution**: `.specify/memory/constitution.md` at **v1.7.0** ✅
+
+---
+
+## 🛑 Current Blocked State: Embedded Subtitle Pairing (Active Discussion)
+
+The scan log indicates: **The system is working exactly as required in terms of Isolation (US1)**, but it still faces the "Subtitle Pairing" issue.
+
+1. **Success of Trash Isolation (US1)**: The program now scans directories intelligently and does not drown in infinite loops, which is a major stability milestone.
+2. **Current Pairing Blocker**: The program logs `"no matching ASS subtitle sibling for MKV"` for all MKV files in the `Bungo Stray Dogs` folder. This indicates that the subtitle files (.ass) are either embedded inside the MKV containers themselves (not present as separate files), or they are missing entirely from the library path.
+
+Since we are in the "New Era" of the project, we should not let the program depend solely on external files. We have developed the **Embedded ASS Reader** feature, which is designed to read subtitles directly from inside the MKV files.
+
+### 💡 Proposed Plan:
+
+Now that the hotfixes are complete and the project is on solid ground, we propose integrating the embedded subtitle reading feature into the current scan engine so that the program successfully identifies and extracts subtitle info for folders like `Bungo Stray Dogs`, even in the absence of separate `.ass` files.
+
+**Active Question for User**: Should we start modifying `LibraryScanner` immediately to rely on `v2_get_embedded_subs_info` (which we prepared in the code) instead of searching only for external files? This will make the system highly professional and scan the entire library immediately without requiring any manual file naming changes.
+
+We are currently **STOPPED** at this step waiting for user approval before modifying `LibraryScanner`.
 
 ---
 

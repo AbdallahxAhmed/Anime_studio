@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 CACHE_VERSION = "3.0"
 
 
+class SubtitleConfig(BaseModel):
+    preferred_language: str = "ara"
+    strict_language: bool = True
+
+
 class AppConfig(BaseModel):
     proxy: str | None = None
     max_concurrent_disk_io: int = Field(default=4, ge=1)
@@ -17,6 +22,7 @@ class AppConfig(BaseModel):
     font_cache_path: Path | None = None
     startup_ping_timeout_s: float = Field(default=2.0, ge=0.0)
     library_path: Path | None = None
+    subtitle: SubtitleConfig = SubtitleConfig()
 
     def save_to_toml(self, file_path: Path | str | None = None) -> None:
         """Save config parameters to TOML file."""
@@ -37,7 +43,9 @@ class AppConfig(BaseModel):
 
         lines = ["[app]"]
         # Use model_dump() for pydantic v2 compatible dict dump
-        for key, value in self.model_dump().items():
+        data = self.model_dump()
+        app_data = {k: v for k, v in data.items() if k != "subtitle"}
+        for key, value in app_data.items():
             if value is None:
                 continue
             if isinstance(value, Path):
@@ -47,6 +55,16 @@ class AppConfig(BaseModel):
                 lines.append(f'{key} = "{value}"')
             elif isinstance(value, bool):
                 lines.append(f'{key} = {str(value).lower()}')
+            else:
+                lines.append(f'{key} = {value}')
+
+        lines.append("")
+        lines.append("[subtitle]")
+        for key, value in self.subtitle.model_dump().items():
+            if isinstance(value, bool):
+                lines.append(f'{key} = {str(value).lower()}')
+            elif isinstance(value, str):
+                lines.append(f'{key} = "{value}"')
             else:
                 lines.append(f'{key} = {value}')
 
@@ -74,9 +92,12 @@ class AppConfig(BaseModel):
             with path.open("rb") as f:
                 data = tomllib.load(f)
             # Feed parsed dict directly into instantiation
-            config_data = (
-                data.get("app", data) if isinstance(data.get("app"), dict) else data
-            )
+            if isinstance(data.get("app"), dict):
+                config_data = dict(data["app"])
+                if isinstance(data.get("subtitle"), dict):
+                    config_data["subtitle"] = data["subtitle"]
+            else:
+                config_data = data
             return cls(**config_data)
         except Exception as e:
             from src.errors import ConfigurationError

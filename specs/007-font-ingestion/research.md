@@ -1,109 +1,135 @@
-# Research: Hotfix — Core Stability & Hunter Resolution (v1.7.0)
+# Research: Embedded Subtitle Extraction
 
-**Generated**: 2026-05-27 | **Status**: Complete
+**Feature**: Embedded Subtitle Extraction via mkvextract
+**Date**: 2026-05-27
+**Status**: Complete
 
-## Research Task 1: Scanner Trash Exclusion
+## R1: mkvextract CLI Invocation
 
-**Decision**: Filter all dot-prefixed directories from `rglob()` results via a `_is_excluded()` helper.
+**Decision**: `mkvextract tracks <mkv_path> <track_id>:<output_path>`
 
-**Rationale**: The scanner at `src/core/library_scanner.py` uses `lib_path.rglob("*.mkv")` with zero path filtering. Both `MuxJob.plan_trash_disposal()` and `SubtitleFile.plan_trash_disposal()` create trash paths under `.anime_studio_trash/` as siblings of episode directories. This means trashed MKV files are re-discovered as valid episodes on subsequent scans.
+**Rationale**: Standard MKVToolNix invocation for track extraction. For ASS/SSA subtitle tracks, the output is a standalone `.ass` file with all formatting preserved. The `track_id` is the 0-based ID from `mkvmerge -J` output's `"id"` field.
 
-**Alternatives Considered**:
-- **Hardcode `.anime_studio_trash` exclusion only**: Rejected — too narrow. `.git/`, `.vscode/`, and any future dot-directories would still pollute results. The Unix convention of hiding dot-prefixed directories is universal and safe.
-- **Use `os.walk()` with `topdown=True` and prune dirs**: Considered — would be more efficient (avoids descending into excluded directories) but requires rewriting the entire scan loop. `rglob` + post-filter is simpler and the performance difference is negligible for typical anime library sizes (~1000 files).
-- **Add an explicit exclusion list to config**: Over-engineering for a hotfix. Can be added later if needed.
+**Alternatives considered**:
+| Alternative | Why Rejected |
+|-------------|-------------|
+| `ffmpeg -map 0:s:0` | May not preserve ASS Advanced SubStation Alpha styling/formatting faithfully |
+| `pymkv` Python library | Adds new dependency, violates Constitution XI (Dependency Isolation). `mkvextract` is already a CRITICAL binary. |
+| Parse raw MKV container in Python | Massive complexity for zero benefit over `mkvextract` |
 
-**Implementation Note**: The filter must check ALL path components relative to the library root, not just the immediate parent. A deeply nested `.anime_studio_trash/Season 1/foo.mkv` must also be excluded.
+**Exit code semantics**:
+- `0` = success
+- `1` = warning (non-fatal)  
+- `2` = error
 
----
+This is identical to `mkvmerge`'s convention.
 
-## Research Task 2: Dependency Checker Discovery Hierarchy
+## R2: Track ID Mapping from mkvmerge -J
 
-**Decision**: No functional changes needed. Add per-step diagnostic logging only.
+**Decision**: Use `track["id"]` (0-based integer) from `mkvmerge -J` JSON output.
 
-**Rationale**: The existing `discover_one()` method in `src/adapters/dependency_checker.py` correctly implements all 5 steps from Constitution Section XIII:
-1. `~/scoop/shims/<tool>.exe` ✓
-2. `~/scoop/apps/<tool>/current/**/<tool>.exe` ✓
-3. `C:\Program Files\mpv\<tool>.exe` ✓
-4. `C:\Program Files\<win_folder_name>\**\<tool>.exe` ✓
-5. `shutil.which(<tool>)` ✓
+**Rationale**: Confirmed from MKVToolNix documentation:
+- `"id"`: 0-based track index — this is what `mkvextract` expects
+- `properties.number`: 1-based track UID — NOT used for extraction
+- `properties.track_name`: Human-readable name (e.g., "Arabic", "English")
 
-The original bug report stating this "violates the 5-step discovery rule" is incorrect — the code is already compliant. The real issue is that when discovery fails, there is zero diagnostic output explaining which paths were checked.
+**Example mkvmerge -J output** (truncated):
+```json
+{
+  "tracks": [
+    {
+      "id": 0,
+      "type": "video",
+      "codec": "AVC/H.264/MPEG-4p10"
+    },
+    {
+      "id": 1,
+      "type": "audio",
+      "codec": "AAC"
+    },
+    {
+      "id": 2,
+      "type": "subtitles",
+      "codec": "SubStationAlpha",
+      "properties": {
+        "codec_id": "S_TEXT/ASS",
+        "language": "ara",
+        "language_ietf": "ar",
+        "default_track": true,
+        "number": 3,
+        "track_name": "Arabic"
+      }
+    },
+    {
+      "id": 3,
+      "type": "subtitles",
+      "codec": "SubStationAlpha",
+      "properties": {
+        "codec_id": "S_TEXT/ASS",
+        "language": "eng",
+        "language_ietf": "en",
+        "default_track": false,
+        "number": 4,
+        "track_name": "English"
+      }
+    }
+  ]
+}
+```
 
-**Alternatives Considered**:
-- **Rewrite discovery logic**: Rejected — the logic is already correct. Rewriting would risk introducing regressions.
-- **Add a `--diagnose-tools` CLI flag**: Over-scoped for a hotfix. DEBUG logging is sufficient.
+Extraction command for Arabic track: `mkvextract tracks file.mkv 2:output.ass`
 
----
+## R3: Language Tag Format
 
-## Research Task 3: System Font Hunter Name Extraction
+**Decision**: Support both `language` (ISO 639-2/B, e.g., `"ara"`, `"eng"`) and `language_ietf` (BCP 47, e.g., `"ar"`, `"en"`). Config uses ISO 639-2/B format.
 
-**Decision**: Add `.ttc` support + multi-tier normalization in `search()`.
+**Rationale**: MKVToolNix v67+ added `language_ietf` (BCP 47), but many older MKV files only have the 3-letter `language` tag. The config default of `"ara"` matches ISO 639-2/B which is the most common tagging in anime community releases.
 
-**Rationale**: The `_extract_font_names()` function correctly extracts nameIDs 1, 4, 6, 16 from both Windows (platformID=3) and Mac (platformID=1) records. However:
+Track selection compares the user's `preferred_language` against both `language` and `language_ietf` fields:
+- User sets `preferred_language = "ara"` → matches `language: "ara"` ✓
+- User sets `preferred_language = "ar"` → matches `language_ietf: "ar"` ✓
+- User sets `preferred_language = "eng"` → matches `language: "eng"` ✓
 
-1. **Missing `.ttc`**: Line 106 filters only `.ttf`/`.otf`. TrueType Collections (`.ttc`) are common on Windows (CJK fonts) and macOS (many system fonts). `fonttools.TTFont` can open `.ttc` files via `fontNumber=0`, but only indexes the first font. Full coverage requires `TTCollection` iteration.
+## R4: Config Section Design
 
-2. **No normalization**: The `search()` method does `requested in self._index` — a strict exact-match on lowercased strings. This fails when:
-   - ASS requests `"Arial"` but index only has `"arial regular"` (nameID 4 included the style)
-   - ASS requests `"Segoe UI Semibold"` but font uses `"Segoe UI SemiBold"` (casing) or `"Segoe UI Demi Bold"` (synonym)
-   - Font uses unusual weight names like `"Heavy"`, `"Poster"`, `"Hairline"`
+**Decision**: Add `[subtitle]` section to TOML with two fields.
 
-**Normalization Strategy** (progressive, from cheapest to most expensive):
-1. Exact match (existing fast path)
-2. Strip trailing style suffixes ("Regular", "Normal", "Book", "Roman", etc.)
-3. Try appending common suffixes to bare family name
-4. Weight synonym expansion (e.g., "Semibold" ↔ "Demi Bold")
+**Rationale**: Keeping subtitle-specific config separate from `[app]` follows TOML best practices (semantic grouping) and leaves room for future subtitle-related config (e.g., `fallback_language`, `extract_fonts`).
 
-**Alternatives Considered**:
-- **Fuzzy matching (Levenshtein distance)**: Rejected — too risky for a hotfix. False positives (matching the wrong font) are worse than false negatives. Can be explored in a future iteration.
-- **Pre-normalize all index keys during build**: Partially adopted — generate additional stripped keys during index build. But keep originals too for exact-match fast path.
+```toml
+[subtitle]
+preferred_language = "ara"
+strict_language = true
+```
 
----
+**Field semantics**:
+- `preferred_language` (str, default `"ara"`): ISO 639-2/B language code to prefer when selecting embedded tracks
+- `strict_language` (bool, default `true`): When `true`, episodes without a matching language track are skipped entirely. When `false`, the system falls back to the default track or the first available ASS track.
 
-## Research Task 4: Network Font Hunter Architecture
+## R5: Extracted File Placement
 
-**Decision**: Create a new `NetworkFontHunter` implementing `HunterProtocol` with Google Fonts API as the initial source.
+**Decision**: Use `.anime_studio_trash/EXP-YYYY-MM-DD-<filename>.tmp.ass` format.
 
-**Rationale**: `src/hunters/` contains only `registry.py` and `system_font_hunter.py`. No network-based font resolution exists. The resolution chain is Cache → SystemFontHunter → failure. Any font not installed locally and not in the cache is unresolvable.
+**Rationale**: Reuses the existing `TrashReceipt` naming convention from `SubtitleFile.plan_trash_disposal()`. The `EXP-` prefix ensures automatic cleanup by the trash janitor. The `.tmp.ass` suffix signals it's a temporary extraction artifact.
 
-**Design Decisions**:
-- **Single file, single source (Google Fonts)**: Start minimal. Additional sources (DaFont, FontSquirrel) can be added as separate hunter implementations later.
-- **API key gated**: `supports()` returns `False` when `google_fonts_api_key` is absent from config. Zero functionality when unconfigured — no crashes, no errors.
-- **Client-per-request**: Create `httpx.AsyncClient` per operation via `_make_client()`. Avoids holding open connections and simplifies proxy injection. The rate limiter in `FontResolver` already throttles requests.
-- **Priority 6**: After cache (implicit layer 1) and system fonts (priority 4). Before any future lower-priority hunters.
+**Example**: For `[SubsPlease] Frieren - 01 [1080p].mkv` extracted on 2026-05-27 with 30-day retention:
+```
+.anime_studio_trash/EXP-2026-06-26-[SubsPlease] Frieren - 01 [1080p].tmp.ass
+```
 
-**Alternatives Considered**:
-- **Scraping Google Fonts website**: Rejected — fragile, violates ToS, blocked by CDN. API is stable and free.
-- **Bundling a font list**: Rejected — becomes stale. Live API query ensures up-to-date results.
-- **Making network hunter mandatory**: Rejected — many users run offline or behind strict firewalls. Optional-by-API-key is the right default.
+## R6: Backward Compatibility
 
----
+**Decision**: `MkvextractPort` parameter in `PipelineRunner.__init__()` is optional (`None` default).
 
-## Research Task 5: Startup Ping & Circuit Breaker Behavior
+**Rationale**: This ensures:
+- Existing callers constructing `PipelineRunner` without `mkvextract_adapter` continue to work
+- Tests that don't need extraction aren't forced to mock it
+- If `mkvextract` binary is somehow missing at runtime, the system degrades gracefully to the old skip behavior
 
-**Decision**: Inject `config.proxy` into `startup_ping()`'s `httpx.AsyncClient`. Reduce ping failure from force-trip to single failure record.
+## R7: FilesystemPort.ensure_directory
 
-**Rationale**: `FontResolver.startup_ping()` at line 137 creates `httpx.AsyncClient()` with no arguments. For proxy users, ALL pings fail. The `_ping_hunter()` method then force-trips the circuit breaker by recording `threshold` failures in a loop (lines 131-132). This means a single failed ping permanently disables the hunter for the entire session (60s cooldown, but by then the pipeline is likely done).
+**Decision**: Check if `ensure_directory` exists on `FilesystemPort`. If not, add it.
 
-**Circuit Breaker Analysis** (`src/core/circuit_breaker.py`):
-- States: CLOSED → OPEN (after `threshold` consecutive failures) → HALF_OPEN (after `cooldown_s`) → CLOSED (on success) or OPEN (on failure)
-- Default threshold: 3, default cooldown: 60s
-- The force-trip loop (`for _ in range(threshold): cb.record_failure()`) immediately transitions to OPEN, skipping the natural escalation path
+**Finding**: Current `FilesystemPort` has `write_file_atomic`, `move_to_trash`, `replace_file`. Need to verify if `ensure_directory` exists or needs to be added.
 
-**Fix**: Record only 1 failure per failed ping. If the hunter also fails during actual resolution, the natural 3-failure threshold still trips the breaker. This gives the hunter a fair chance to work even if the ping URL was temporarily unreachable.
-
-**Alternatives Considered**:
-- **Remove startup pings entirely**: Rejected — they provide useful early warning about network issues. Just need to be less aggressive.
-- **Add a "soft" circuit breaker state**: Over-engineering. Single failure record achieves the same effect within the existing state machine.
-- **Make ping failure non-counting**: Rejected — pings DO provide signal about network health. One failure should count as one data point.
-
----
-
-## Research Task 6: Font Cache Normalization Gap
-
-**Decision**: Out of scope for this hotfix. Document as follow-up.
-
-**Rationale**: `FontCache.lookup()` at line 111 does `if font_name not in fonts` — a strict exact-match on the raw font name string. This means the cache has the same normalization gap as the hunter. However, fixing the cache is a broader change that affects store/lookup/rebuild semantics and the TOML index format. The immediate hotfix should focus on the hunter layer where fonts are first resolved. Once the SystemFontHunter returns a properly matched `FontAsset`, the cache stores it under the correct name for future lookups.
-
-**Follow-up**: Add normalization to `FontCache.lookup()` in a future iteration, potentially using the same `_strip_style_suffix()` and synonym logic.
+**Resolution**: Will add `ensure_directory(path: Path) -> None` to both port and adapter if missing. Implementation uses `asyncio.to_thread(path.mkdir, parents=True, exist_ok=True)`.

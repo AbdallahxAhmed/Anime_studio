@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.core.pipeline_runner import PipelineRunner
 from src.core.font_resolver import FontResolver
+from src.core.library_scanner import LibraryScanner
 from src.ports.subprocess import SubprocessPort
 from src.ports.filesystem import FilesystemPort
 from src.adapters.dependency_checker import ToolRegistry
@@ -85,6 +86,13 @@ def app_config():
     return AppConfig(max_concurrent_disk_io=2)
 
 
+def _make_mock_scanner(scan_output: LibraryScanOutput) -> LibraryScanner:
+    """Create a mock LibraryScanner that returns the given output."""
+    scanner = MagicMock(spec=LibraryScanner)
+    scanner.scan = AsyncMock(return_value=scan_output)
+    return scanner
+
+
 @pytest.mark.anyio
 async def test_pipeline_runner_empty_library(
     mock_font_resolver,
@@ -95,6 +103,9 @@ async def test_pipeline_runner_empty_library(
     disk_semaphore,
     app_config,
 ):
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=[], font_directories=[])
+    )
     runner = PipelineRunner(
         font_resolver=mock_font_resolver,
         subprocess_adapter=mock_subprocess,
@@ -103,21 +114,17 @@ async def test_pipeline_runner_empty_library(
         config=app_config,
         font_ingestion_service=mock_font_ingestion_service,
         disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
     )
 
-    # Point to an empty directory mock
-    with patch(
-        "src.core.pipeline_runner.scan_library",
-        AsyncMock(return_value=LibraryScanOutput(episodes=[], font_directories=[])),
-    ):
-        cfg = PipelineConfig(library_path=Path("/empty"))
-        report = await runner.run(cfg)
+    cfg = PipelineConfig(library_path=Path("/empty"))
+    report = await runner.run(cfg)
 
-        assert report.total_fonts_found == 0
-        assert len(report.episodes) == 0
-        mock_filesystem.write_file_atomic.assert_called_once()
-        # Ingestion shouldn't be called since there are no directories
-        mock_font_ingestion_service.ingest_directories.assert_not_called()
+    assert report.total_fonts_found == 0
+    assert len(report.episodes) == 0
+    mock_filesystem.write_file_atomic.assert_called_once()
+    # Ingestion shouldn't be called since there are no directories
+    mock_font_ingestion_service.ingest_directories.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -130,6 +137,18 @@ async def test_pipeline_runner_success(
     disk_semaphore,
     app_config,
 ):
+    scan_res = [
+        LibraryScanResult(
+            episode_path=Path("/anime/cool_show_01.mkv"),
+            subtitle_path=Path("/anime/cool_show_01.ass"),
+            anime_title="Cool Show",
+        )
+    ]
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(
+            episodes=scan_res, font_directories=[Path("/anime/Fonts")]
+        )
+    )
     runner = PipelineRunner(
         font_resolver=mock_font_resolver,
         subprocess_adapter=mock_subprocess,
@@ -138,31 +157,14 @@ async def test_pipeline_runner_success(
         config=app_config,
         font_ingestion_service=mock_font_ingestion_service,
         disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
     )
-
-    scan_res = [
-        LibraryScanResult(
-            episode_path=Path("/anime/cool_show_01.mkv"),
-            subtitle_path=Path("/anime/cool_show_01.ass"),
-            anime_title="Cool Show",
-        )
-    ]
 
     repaired_content = "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial"
 
-    with (
-        patch(
-            "src.core.pipeline_runner.scan_library",
-            AsyncMock(
-                return_value=LibraryScanOutput(
-                    episodes=scan_res, font_directories=[Path("/anime/Fonts")]
-                )
-            ),
-        ),
-        patch(
-            "src.core.pipeline_runner.repair_ass",
-            MagicMock(return_value=repaired_content),
-        ),
+    with patch(
+        "src.core.pipeline_runner.repair_ass",
+        MagicMock(return_value=repaired_content),
     ):
         cfg = PipelineConfig(library_path=Path("/anime"), dry_run=False)
         report = await runner.run(cfg)
@@ -189,6 +191,16 @@ async def test_pipeline_runner_subtitle_sync_fallback(
     disk_semaphore,
     app_config,
 ):
+    scan_res = [
+        LibraryScanResult(
+            episode_path=Path("/anime/ep1.mkv"),
+            subtitle_path=Path("/anime/ep1.ass"),
+            anime_title="Show",
+        )
+    ]
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=scan_res, font_directories=[])
+    )
     # Setup runner
     runner = PipelineRunner(
         font_resolver=mock_font_resolver,
@@ -198,15 +210,9 @@ async def test_pipeline_runner_subtitle_sync_fallback(
         config=app_config,
         font_ingestion_service=mock_font_ingestion_service,
         disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
     )
 
-    scan_res = [
-        LibraryScanResult(
-            episode_path=Path("/anime/ep1.mkv"),
-            subtitle_path=Path("/anime/ep1.ass"),
-            anime_title="Show",
-        )
-    ]
     repaired_content = "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial"
 
     # Setup subprocess execution to simulate alass failure and ffsubsync success
@@ -242,12 +248,6 @@ async def test_pipeline_runner_subtitle_sync_fallback(
     mock_subprocess.execute.side_effect = mock_execute
 
     with (
-        patch(
-            "src.core.pipeline_runner.scan_library",
-            AsyncMock(
-                return_value=LibraryScanOutput(episodes=scan_res, font_directories=[])
-            ),
-        ),
         patch(
             "src.core.pipeline_runner.repair_ass",
             MagicMock(return_value=repaired_content),

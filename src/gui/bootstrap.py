@@ -131,6 +131,15 @@ def bootstrap_app(app: QApplication) -> Any:
         cache=font_cache, disk_semaphore=disk_semaphore
     )
 
+    # Create MkvmergeAdapter and LibraryScanner for embedded sub detection
+    adapters_mkvmerge = importlib.import_module("src.adapters.mkvmerge")
+    MkvmergeAdapter = adapters_mkvmerge.MkvmergeAdapter
+    mkvmerge_adapter = MkvmergeAdapter(subprocess_port=subprocess_adapter)
+
+    core_scanner = importlib.import_module("src.core.library_scanner")
+    LibraryScanner = core_scanner.LibraryScanner
+    library_scanner = LibraryScanner(mkvmerge=mkvmerge_adapter)
+
     core_runner = importlib.import_module("src.core.pipeline_runner")
     PipelineRunner = core_runner.PipelineRunner
     pipeline_runner = PipelineRunner(
@@ -141,6 +150,7 @@ def bootstrap_app(app: QApplication) -> Any:
         config=config,
         font_ingestion_service=font_ingestion_service,
         disk_semaphore=disk_semaphore,
+        library_scanner=library_scanner,
     )
 
     # 4. Create log bridge

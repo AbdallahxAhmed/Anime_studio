@@ -1,11 +1,13 @@
 from src.models._types import SerializablePath
 from src.models.font import FontQuery, FontAsset, HunterResult, FontPayload
-from src.models.subtitle import AssetLifecycle, SubtitleFile, SyncResult
+from src.models.subtitle import AssetLifecycle, SubtitleFile, SubtitleSource, SyncResult
 from src.models.trash import TrashReceipt
 from src.models.mux import MuxJob, MuxResult
 from src.models.tool_result import ToolResult
 from src.models.report import EpisodeStatus, EpisodeReport, PipelineReport
 from src.models.pipeline import (
+    EmbeddedTrack,
+    EmbeddedSubInfo,
     LibraryScanResult,
     EpisodeContext,
     PipelineConfig,
@@ -21,6 +23,7 @@ __all__ = [
     "FontPayload",
     "AssetLifecycle",
     "SubtitleFile",
+    "SubtitleSource",
     "SyncResult",
     "TrashReceipt",
     "MuxJob",
@@ -29,6 +32,8 @@ __all__ = [
     "EpisodeStatus",
     "EpisodeReport",
     "PipelineReport",
+    "EmbeddedTrack",
+    "EmbeddedSubInfo",
     "LibraryScanResult",
     "EpisodeContext",
     "PipelineConfig",

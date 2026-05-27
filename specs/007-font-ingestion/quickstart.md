@@ -1,63 +1,40 @@
-# Quickstart: Hotfix — Core Stability & Hunter Resolution (v1.7.0)
+# Quickstart: Embedded Subtitle Extraction
 
 ## What Changed
 
-This hotfix resolves three critical pipeline failures:
+The pipeline now extracts embedded ASS subtitle tracks from MKV files instead of skipping them. When an MKV has no external `.ass` sibling, the system:
 
-### 1. Scanner No Longer Processes Trash Directories
-The library scanner now excludes all dot-prefixed directories (`.anime_studio_trash`, `.git`, etc.) from its recursive scan. MKV files previously moved to trash are no longer rediscovered as valid episodes.
-
-### 2. Tool Discovery Now Logs Every Step
-When `alass` or another tool isn't found, the DEBUG log now shows every path that was checked. This makes it trivial to diagnose "tool not found" issues:
-
-```
-DEBUG: Discovery step 1: checking scoop shim | tool=alass | path=C:\Users\you\scoop\shims\alass.exe | exists=False
-DEBUG: Discovery step 2: checking scoop app dir | tool=alass | path=C:\Users\you\scoop\apps\alass\current | exists=False
-DEBUG: Discovery step 3: checking mpv directory | tool=alass | path=C:\Program Files\mpv\alass.exe | exists=False
-DEBUG: Discovery step 4: checking Program Files | tool=alass | path=C:\Program Files\alass | exists=False
-DEBUG: Discovery step 5: checking shutil.which | tool=alass | result=None
-WARNING: optional dependency missing | name=alass
-```
-
-### 3. Font Resolution Actually Works Now
-
-**System fonts**: The `SystemFontHunter` now:
-- Scans `.ttc` files (TrueType Collections), not just `.ttf`/`.otf`
-- Applies progressive normalization when exact match fails (strips "Regular"/"Normal" suffixes, expands weight synonyms like "Semibold" ↔ "Demi Bold")
-
-**Network fonts**: A new `NetworkFontHunter` (Google Fonts API) provides network-based resolution for fonts not found locally. Requires adding `google_fonts_api_key` to your `config.toml`.
-
-**Proxy support**: `startup_ping()` now correctly uses the `proxy` setting from `config.toml`. Users behind SOCKS/HTTP proxies no longer get all network hunters disabled at startup.
-
-**Softer circuit breaker**: A failed startup ping now records 1 failure (not 3), giving the hunter a fair chance during actual resolution instead of being immediately disabled.
+1. Identifies embedded ASS tracks via `mkvmerge -J`
+2. Selects the best track based on your language preference
+3. Extracts it to a temp file via `mkvextract`
+4. Feeds it through the normal repair → sync → font resolve → mux pipeline
 
 ## Configuration
 
-### New config.toml field
+Add a `[subtitle]` section to your `config.toml`:
 
 ```toml
-# Optional: enables Google Fonts API-based font resolution
-google_fonts_api_key = "your-api-key-here"
+[subtitle]
+preferred_language = "ara"    # ISO 639-2/B language code
+strict_language = true        # Skip episodes without matching language
 ```
 
-When absent, the network font hunter silently deactivates — no errors, no crashes.
+**Language codes**: `"ara"` (Arabic), `"eng"` (English), `"jpn"` (Japanese), `"fre"` (French), etc.
 
-### Existing proxy field (now actually works)
+**Strict mode**:
+- `true` (default): Only extract tracks matching your preferred language. Episodes without a match are skipped with a clear warning.
+- `false`: Falls back to the default track or first available ASS track when preferred language is missing.
 
-```toml
-# Optional: proxy for all network requests including startup pings
-proxy = "socks5://127.0.0.1:1080"
-```
+## Behavior
 
-## Verification
+| Scenario | strict=true | strict=false |
+|----------|-------------|--------------|
+| Preferred language found | ✅ Extract & process | ✅ Extract & process |
+| No preferred, has other ASS tracks | ⚠️ Skip + warning | ✅ Extract default/first |
+| No ASS tracks at all | ⚠️ Skip | ⚠️ Skip |
+| mkvextract not available | ⚠️ Skip (old behavior) | ⚠️ Skip (old behavior) |
 
-```bash
-# Run the full test suite
-pytest tests/ -v
+## Prerequisites
 
-# Run only the hotfix-related tests
-pytest tests/unit/core/test_library_scanner.py -v
-pytest tests/unit/adapters/test_dependency_checker.py -v
-pytest tests/unit/hunters/ -v
-pytest tests/unit/core/test_font_resolver.py -v
-```
+- `mkvextract` (part of MKVToolNix) must be installed — it's already a CRITICAL dependency
+- Install via Scoop: `scoop install mkvtoolnix`
