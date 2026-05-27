@@ -1,7 +1,7 @@
 # COMPACT_STATE.md — Anime Studio v3
 
 **Last Updated**: 2026-05-27
-**Status**: Backend (Phases 0–3), GUI (Phase 5b PySide6), & Font Ingestion System (Phase 6) COMPLETE ✅
+**Status**: Backend (Phases 0–3), GUI (Phase 5b PySide6), Font Ingestion (Phase 6), & v1.7.0 Hotfix Stability COMPLETE ✅
 **Active Spec**: `specs/007-font-ingestion` (Completed) ✅
 **Branch**: `008-font-ingestion`
 **Constitution**: `.specify/memory/constitution.md` at **v1.7.0** ✅
@@ -20,6 +20,7 @@
 | Phase 5a — Flet GUI              | ❌ ABANDONED    | API instability, catastrophic failures            |
 | **Phase 5b — PySide6 GUI**       | ✅ **COMPLETE** | Thread-safe qasync integration, 142 tests passing |
 | **Phase 6 — Font Ingestion**     | ✅ **COMPLETE** | Auto-discovery, manual button, drag-and-drop, semaphore, 171 tests passing |
+| **v1.7.0 Hotfix Core Stability** | ✅ **COMPLETE** | Resolved trash loop, soft CB, TTC/normalization, 178 tests passing |
 | Phase 7 — Packaging (.exe)       | 🚀 **NEXT**     | PyInstaller/Nuitka                                |
 | Phase 8 — Settings UI            | 📋 PLANNED      | Visual config.toml editor                         |
 
@@ -37,8 +38,8 @@
 
 **Core Services** (`src/core/`):
 
-- `PipelineRunner`: Orchestrates scan → repair → sync → font resolution → mux
-- `FontResolver`: 6-layer resolution chain with fallback
+- `PipelineRunner`: Orchestrates scan → repair → sync → font resolution → mux (now ignores dot-prefixed directories via `_is_excluded`)
+- `FontResolver`: 6-layer resolution chain with fallback (startup pings now inject `config.proxy`, ping failures softly record 1 failure rather than force-tripping)
 - `SubtitleRepairer`: cp1252→cp1256 heuristic for legacy Arabic subs
 - Disk I/O protection: `asyncio.Semaphore(3)` for concurrent muxing
 
@@ -55,7 +56,7 @@
   1. Local cache (`.anime_studio/font_cache/`)
   2. MKV extract (embedded fonts)
   3. Sibling scan (fonts/ directories)
-  4. System fonts (Windows/Linux/macOS)
+  4. System fonts (Windows/Linux/macOS - fully supports `.ttc` collection indexing and 4 progressive name normalization tiers)
   5. Network (font CDNs)
   6. Fuzzy matching fallback
 - Each hunter implements `HunterProtocol`
@@ -153,7 +154,7 @@
 
 ### Testing & Quality Assurance
 
-**Test Coverage**: 171/171 tests passing (100%)
+**Test Coverage**: 178/178 tests passing (100%)
 
 **Test Categories**:
 
@@ -192,9 +193,30 @@
   - Updated `bootstrap.py` to pass resolved `tool_registry` to `SubprocessAdapter`
 - **Commit**: `fix(gui/core): fix qdarktheme load and resolve absolute tool paths`
 
+**Bug 3: Scanner Trash Ingestion Loop (US1)**
+
+- **Error**: Pipeline recursively rediscovering and reprocessing original episodes previously moved to `.anime_studio_trash/` or indexing `.git/` files.
+- **Cause**: `library_scanner.py` using recursive `rglob("*.mkv")` without excluding hidden or dot-prefixed directories.
+- **Fix**: Created `_is_excluded()` path helper checking if relative parts start with `.` and applied to filter out files and directories under `.anime_studio_trash/`, `.git/`, and `.vscode/` for MKVs and sister Font directories.
+- **Commit**: `[Spec Kit] Phase 5-8: Complete GUI integration, feedback logs, and type polish`
+
+**Bug 4: SystemFontHunter TTC & Normalization Collapse (US3)**
+
+- **Error**: Arial/Segoe UI variants fail exact-match searches, and TrueType Collection (`.ttc`) system fonts are silently ignored.
+- **Cause**: No progressive name matching and strict `.ttf`/`.otf` extension checks excluding `.ttc` files and multi-font records.
+- **Fix**: Added `fontTools.ttLib.TTCollection` support to parse and index multiple fonts in `.ttc` files. Implemented a 4-tier progressive normalization matching chain (exact match, suffix stripping, suffix appending, weight synonym substitution) along with pre-indexing suffix-stripped variants.
+- **Commit**: `[Spec Kit] Phase 5-8: Complete GUI integration, feedback logs, and type polish`
+
+**Bug 5: FontResolver Startup Ping VPN/Proxy Collapse (US5)**
+
+- **Error**: Startup health checks trip circuit breakers immediately for users behind corporate/censored networks, and a single timeout force-trips the breaker.
+- **Cause**: `httpx.AsyncClient` lacking proxy injection in `startup_ping()`, and health failure loops recording `circuit_breaker_threshold` failures immediately.
+- **Fix**: Injected `config.proxy` into the `startup_ping` HTTP client, and softened failure severity by recording a single CB failure instead of force-tripping.
+- **Commit**: `[Spec Kit] Phase 5-8: Complete GUI integration, feedback logs, and type polish`
+
 **Verification**:
 
-- All 171 tests passing after fixes
+- All 178 tests passing after fixes
 - End-to-end pipeline run successful:
   - 6 episodes scanned
   - Subtitles repaired and synced via ffsubsync

@@ -186,7 +186,45 @@ async def test_resolver_startup_ping_success_and_failure(registry, mock_cache, c
         await resolver.startup_ping()
 
         assert cb1.state == CircuitBreakerState.CLOSED
-        assert cb2.state == CircuitBreakerState.OPEN
+        assert cb1._failure_count == 0
+        assert cb2.state == CircuitBreakerState.CLOSED
+        assert cb2._failure_count == 1
+
+
+@pytest.mark.anyio
+async def test_resolver_startup_ping_proxy_injection(registry, mock_cache, config):
+    config.proxy = "http://myproxy:8080"
+    h1 = ConformingMockHunter("Hunter1", ping_url="http://success.com")
+    registry.register(h1)
+
+    resolver = FontResolver(registry=registry, cache=mock_cache, config=config)
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.head.return_value = MagicMock(status_code=200)
+
+        await resolver.startup_ping()
+
+        mock_client_cls.assert_called_once_with(proxy="http://myproxy:8080")
+
+
+@pytest.mark.anyio
+async def test_resolver_startup_ping_no_proxy(registry, mock_cache, config):
+    config.proxy = None
+    h1 = ConformingMockHunter("Hunter1", ping_url="http://success.com")
+    registry.register(h1)
+
+    resolver = FontResolver(registry=registry, cache=mock_cache, config=config)
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.head.return_value = MagicMock(status_code=200)
+
+        await resolver.startup_ping()
+
+        mock_client_cls.assert_called_once_with()
 
 
 @pytest.mark.anyio
@@ -238,4 +276,3 @@ async def test_resolver_skips_download_for_non_cacheable_assets(
     # Verify download and store were NEVER called
     hunter.download.assert_not_called()
     mock_cache.store.assert_not_called()
-

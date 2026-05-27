@@ -122,19 +122,21 @@ class FontResolver:
                 )
         except Exception as e:
             logger.warning(
-                "Startup ping failed. Opening circuit breaker.",
+                "Startup ping failed. Hunter will still be attempted during resolution.",
                 hunter_name=hunter.name,
                 url=hunter.ping_url,
                 error=str(e),
             )
-            # Force trip the circuit breaker immediately
-            for _ in range(hunter.circuit_breaker_threshold):
-                cb.record_failure()
+            # Record a single failure on startup ping failure (don't force trip)
+            cb.record_failure()
 
     async def startup_ping(self) -> None:
         """Concurrent health ping for all network hunters using TaskGroup."""
         logger.info("Initializing concurrent startup pings for network hunters")
-        async with httpx.AsyncClient() as client:
+        client_kwargs = {}
+        if self.config.proxy:
+            client_kwargs["proxy"] = self.config.proxy
+        async with httpx.AsyncClient(**client_kwargs) as client:
             try:
                 async with asyncio.TaskGroup() as tg:
                     # Registry iter_hunters sorts them, but we want to ping all hunters in _hunters
