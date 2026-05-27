@@ -1,15 +1,19 @@
 import asyncio
 import time
-from typing import Sequence
+from typing import Sequence, Any
 import structlog
 
 from src.models.tool_result import ToolResult
 from src.ports.subprocess import SubprocessPort
+from pathlib import Path
 
 logger = structlog.get_logger()
 
 
 class SubprocessAdapter(SubprocessPort):
+    def __init__(self, tool_registry: Any = None) -> None:
+        self.tool_registry = tool_registry
+
     async def execute(
         self,
         args: Sequence[str],
@@ -27,6 +31,12 @@ class SubprocessAdapter(SubprocessPort):
             )
 
         tool_name = args[0]
+        # Resolve to absolute path using tool_registry if available
+        if self.tool_registry and not Path(tool_name).is_absolute():
+            resolved = self.tool_registry.get(tool_name)
+            if resolved and resolved.is_available:
+                tool_name = str(resolved.path)
+
         start_time = time.perf_counter()
         process = None
 
@@ -88,6 +98,7 @@ class SubprocessAdapter(SubprocessPort):
             )
 
         except FileNotFoundError as e:
+            logger.error(f"subprocess tool not found: {tool_name} (error: {e})")
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             return ToolResult(
                 tool_name=tool_name,
@@ -99,6 +110,9 @@ class SubprocessAdapter(SubprocessPort):
                 suggestion=f"tool not found: {e}",
             )
         except Exception as e:
+            logger.error(
+                f"subprocess execution exception occurred: {tool_name} (error: {e})"
+            )
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             if process:
                 try:

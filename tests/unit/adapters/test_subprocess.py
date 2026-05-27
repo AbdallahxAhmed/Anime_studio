@@ -81,6 +81,40 @@ async def test_subprocess_binary_not_found(mocker):
 
 
 @pytest.mark.anyio
+async def test_subprocess_path_resolution_with_registry(mocker):
+    # Mock resolved tool
+    mock_tool = mocker.MagicMock()
+    mock_tool.name = "mkvmerge"
+    mock_tool.path = Path("C:/Program Files/MKVToolNix/mkvmerge.exe")
+    mock_tool.is_available = True
+
+    # Mock tool registry
+    mock_registry = mocker.MagicMock()
+    mock_registry.get.return_value = mock_tool
+
+    adapter = SubprocessAdapter(tool_registry=mock_registry)
+
+    mock_process = mocker.AsyncMock()
+    mock_process.communicate.return_value = (b"mux success", b"")
+    mock_process.returncode = 0
+    mock_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", return_value=mock_process
+    )
+
+    result = await adapter.execute(["mkvmerge", "-o", "out.mkv"])
+
+    # Verify create_subprocess_exec was called with absolute path
+    mock_exec.assert_called_once_with(
+        str(Path("C:/Program Files/MKVToolNix/mkvmerge.exe")),
+        "-o",
+        "out.mkv",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert result.success is True
+
+
+@pytest.mark.anyio
 async def test_subprocess_os_error(mocker):
     adapter = SubprocessAdapter()
 

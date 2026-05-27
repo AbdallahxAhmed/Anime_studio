@@ -14,8 +14,7 @@ def apply_dark_theme(app: QApplication) -> None:
     try:
         import qdarktheme
 
-        theme = qdarktheme.load_theme("dark")
-        app.setStyleSheet(theme)
+        qdarktheme.setup_theme("dark")
         logger.info("Successfully applied qdarktheme (dark mode)")
     except Exception as e:
         logger.warning(

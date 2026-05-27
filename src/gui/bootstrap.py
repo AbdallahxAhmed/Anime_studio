@@ -88,19 +88,20 @@ def bootstrap_app(app: QApplication) -> Any:
             else:
                 cache_dir = Path.home() / ".anime_studio" / "font_cache"
 
-    # 2. Create adapters dynamically
-    adapters_sub = importlib.import_module("src.adapters.subprocess")
-    SubprocessAdapter = adapters_sub.SubprocessAdapter
-    subprocess_adapter = SubprocessAdapter()
-
-    adapters_fs = importlib.import_module("src.adapters.filesystem")
-    FilesystemAdapter = adapters_fs.FilesystemAdapter
-    filesystem_adapter = FilesystemAdapter()
-
+    # 2. Resolve dependencies first
     adapters_dep = importlib.import_module("src.adapters.dependency_checker")
     DependencyChecker = adapters_dep.DependencyChecker
     dependency_checker = DependencyChecker()
     tool_registry = dependency_checker.discover_all()
+
+    # 3. Create adapters dynamically
+    adapters_sub = importlib.import_module("src.adapters.subprocess")
+    SubprocessAdapter = adapters_sub.SubprocessAdapter
+    subprocess_adapter = SubprocessAdapter(tool_registry=tool_registry)
+
+    adapters_fs = importlib.import_module("src.adapters.filesystem")
+    FilesystemAdapter = adapters_fs.FilesystemAdapter
+    filesystem_adapter = FilesystemAdapter()
 
     # 3. Create core services dynamically
     core_cache = importlib.import_module("src.core.font_cache")
