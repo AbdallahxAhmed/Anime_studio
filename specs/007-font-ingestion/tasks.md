@@ -50,14 +50,14 @@
 
 ### Tests for User Story 1
 
-- [ ] T009 [P] [US1] Add contract test verifying `SystemFontHunter` conforms to `HunterProtocol` (runtime_checkable) in tests/contract/test_hunter_protocol.py
-- [ ] T010 [P] [US1] Create unit tests for `SystemFontHunter` in tests/unit/hunters/test_system_font_hunter.py: test `_get_system_font_dirs()` per OS, test `_extract_font_names()` with fixture .ttf, test `search()` match/miss, test `supports()` always True, test `download()` raises NotImplementedError
+- [x] T009 [P] [US1] Add contract test verifying `SystemFontHunter` conforms to `HunterProtocol` (runtime_checkable) in tests/contract/test_hunter_protocol.py
+- [x] T010 [P] [US1] Create unit tests for `SystemFontHunter` in tests/unit/hunters/test_system_font_hunter.py: test `_get_system_font_dirs()` per OS, test `_extract_font_names()` with fixture .ttf, test `search()` match/miss, test `supports()` always True, test `download()` raises NotImplementedError
 
 ### Implementation for User Story 1
 
-- [ ] T011 [US1] Implement `SystemFontHunter` class in src/hunters/system_font_hunter.py: `HunterProtocol` conformant, cross-platform dir scanning via `sys.platform` + `pathlib.Path`, lazy name→path index built on first `search()` call using `fonttools` TTFont nameID extraction, `is_cacheable=False` on returned `FontAsset`, `download()` raises `NotImplementedError`
-- [ ] T012 [US1] Modify `FontResolver.resolve()` in src/core/font_resolver.py: add 3-line short-circuit after `hunter.search()` — if `results[0].font_asset` has `is_cacheable=False`, record CB success and return asset directly (skip `download` + `cache.store`)
-- [ ] T013 [US1] Add unit test for `FontResolver` is_cacheable short-circuit in tests/unit/core/test_font_resolver.py: mock hunter returning `FontAsset(is_cacheable=False)`, verify `download()` never called, verify `cache.store()` never called
+- [x] T011 [US1] Implement `SystemFontHunter` class in src/hunters/system_font_hunter.py: `HunterProtocol` conformant, cross-platform dir scanning via `sys.platform` + `pathlib.Path`, lazy name→path index built on first `search()` call using `fonttools` TTFont nameID extraction, `is_cacheable=False` on returned `FontAsset`, `download()` raises `NotImplementedError`
+- [x] T012 [US1] Modify `FontResolver.resolve()` in src/core/font_resolver.py: add 3-line short-circuit after `hunter.search()` — if `results[0].font_asset` has `is_cacheable=False`, record CB success and return asset directly (skip `download` + `cache.store`)
+- [x] T013 [US1] Add unit test for `FontResolver` is_cacheable short-circuit in tests/unit/core/test_font_resolver.py: mock hunter returning `FontAsset(is_cacheable=False)`, verify `download()` never called, verify `cache.store()` never called
 
 **Checkpoint**: `pytest tests/unit/hunters/ tests/contract/ tests/unit/core/test_font_resolver.py` — all pass. SystemFontHunter resolves "Arial" on Windows, falls through on miss, no cache writes.
 

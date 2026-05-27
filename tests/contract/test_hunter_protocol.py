@@ -1,5 +1,6 @@
 from src.ports.font_hunter import HunterProtocol
 from src.models.font import FontQuery, FontPayload, HunterResult
+from src.hunters.system_font_hunter import SystemFontHunter
 
 # Note: These tests are written test-first and will fail until HunterProtocol is implemented.
 
@@ -57,3 +58,9 @@ def test_hunter_protocol_attributes_type():
     assert isinstance(hunter.rate_limit, float)
     assert isinstance(hunter.circuit_breaker_threshold, int)
     assert hunter.ping_url is None or isinstance(hunter.ping_url, str)
+
+
+def test_system_font_hunter_conformance():
+    hunter = SystemFontHunter()
+    assert isinstance(hunter, HunterProtocol)
+

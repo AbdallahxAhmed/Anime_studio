@@ -187,3 +187,55 @@ async def test_resolver_startup_ping_success_and_failure(registry, mock_cache, c
 
         assert cb1.state == CircuitBreakerState.CLOSED
         assert cb2.state == CircuitBreakerState.OPEN
+
+
+@pytest.mark.anyio
+async def test_resolver_skips_download_for_non_cacheable_assets(
+    registry, mock_cache, config
+):
+    query = FontQuery(
+        requested_name="Arial", anime_title="Naruto", episode_path="ep1.mkv"
+    )  # type: ignore
+
+    hunter = ConformingMockHunter("HunterA")
+
+    # We construct a non-cacheable FontAsset
+    uncacheable_asset = FontAsset(
+        name="Arial",
+        file_path="arial.ttf",  # type: ignore
+        source="system",
+        layer_found=4,
+        cache_hit=False,
+        nameids={},
+        is_cacheable=False,
+    )
+
+    res = HunterResult(
+        query=query,
+        font_asset=uncacheable_asset,
+        success=True,
+        hunter_name="HunterA",
+        duration_ms=10.0,
+        attempts=1,
+    )
+    hunter.search_results = [res]
+
+    # Mock download and cache.store to assert they are NEVER called
+    hunter.download = AsyncMock(side_effect=Exception("Should not be called!"))
+    mock_cache.store = MagicMock(side_effect=Exception("Should not be called!"))
+
+    registry.register(hunter)
+
+    resolver = FontResolver(registry=registry, cache=mock_cache, config=config)
+    asset = await resolver.resolve(query)
+
+    assert asset == uncacheable_asset
+    assert asset.is_cacheable is False
+
+    # Check that lookup was called
+    mock_cache.lookup.assert_called_once_with("Arial")
+
+    # Verify download and store were NEVER called
+    hunter.download.assert_not_called()
+    mock_cache.store.assert_not_called()
+

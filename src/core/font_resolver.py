@@ -61,6 +61,16 @@ class FontResolver:
                     )
                     continue
 
+                # System fonts resolve in-place — skip download and cache
+                if results[0].font_asset and not results[0].font_asset.is_cacheable:
+                    cb.record_success()
+                    logger.info(
+                        "Font successfully resolved in-place",
+                        font_name=query.requested_name,
+                        source=hunter.name,
+                    )
+                    return results[0].font_asset
+
                 # Download first result
                 payload = await hunter.download(results[0])
 
