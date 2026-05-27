@@ -11,6 +11,7 @@ from src.models.subtitle import SubtitleFile, SyncResult
 from src.models.mux import MuxResult
 from src.core.subtitle_repair import repair_ass, extract_fonts
 from src.core.font_resolver import FontResolver
+from src.core.font_ingestion import FontIngestionService
 from src.core.mux_planner import plan_mux
 from src.core.report_writer import render_report, render_incremental_section
 from src.ports.subprocess import SubprocessPort
@@ -31,12 +32,16 @@ class PipelineRunner:
         filesystem: FilesystemPort,
         tool_registry: ToolRegistry,
         config: AppConfig,
+        font_ingestion_service: FontIngestionService,
+        disk_semaphore: asyncio.Semaphore,
     ) -> None:
         self.font_resolver = font_resolver
         self.subprocess_adapter = subprocess_adapter
         self.filesystem = filesystem
         self.tool_registry = tool_registry
         self.config = config
+        self.font_ingestion_service = font_ingestion_service
+        self.disk_semaphore = disk_semaphore
         self._analysis_lock = asyncio.Lock()
 
     async def run(self, pipeline_config: PipelineConfig) -> PipelineReport:
@@ -45,9 +50,31 @@ class PipelineRunner:
         run_timestamp = datetime.now(timezone.utc)
 
         # 1. Scan Library
-        logger.info("Library scan started", stage="scan", progress_current=None, progress_total=None)
-        scan_results = await scan_library(pipeline_config.library_path)
-        logger.info(f"Library scan complete. Found {len(scan_results)} episodes.", stage="scan", progress_current=None, progress_total=len(scan_results))
+        logger.info(
+            "Library scan started",
+            stage="scan",
+            progress_current=None,
+            progress_total=None,
+        )
+        scan_output = await scan_library(pipeline_config.library_path)
+        scan_results = scan_output.episodes
+        font_dirs = scan_output.font_directories
+        logger.info(
+            f"Library scan complete. Found {len(scan_results)} episodes.",
+            stage="scan",
+            progress_current=None,
+            progress_total=len(scan_results),
+        )
+
+        # Pre-pipeline font ingestion step
+        if font_dirs:
+            logger.info(
+                "Auto-discovered font directories, starting ingestion",
+                directories=font_dirs,
+            )
+            await self.font_ingestion_service.ingest_directories(
+                font_dirs, source="auto_discovery"
+            )
 
         # Resolve anime_title
         anime_title = pipeline_config.anime_title
@@ -98,7 +125,7 @@ class PipelineRunner:
             episode_contexts.append(ctx)
 
         # 3. Concurrent Mux Concurrency Semaphore
-        mux_semaphore = asyncio.Semaphore(self.config.max_concurrent_disk_io)
+        mux_semaphore = self.disk_semaphore
         completed_mux_count = 0
         mux_counter_lock = asyncio.Lock()
         total_episodes = len(episode_contexts)
@@ -121,7 +148,12 @@ class PipelineRunner:
                 )
 
             async with mux_semaphore:
-                logger.info(f"Muxing episode: {ctx.scan_result.episode_path.name}", stage="mux", progress_current=completed_mux_count + 1, progress_total=total_episodes)
+                logger.info(
+                    f"Muxing episode: {ctx.scan_result.episode_path.name}",
+                    stage="mux",
+                    progress_current=completed_mux_count + 1,
+                    progress_total=total_episodes,
+                )
                 try:
                     from src.adapters.mkvmerge import MkvmergeAdapter
 
@@ -213,7 +245,12 @@ class PipelineRunner:
                     async with mux_counter_lock:
                         completed_mux_count += 1
                         current_idx = completed_mux_count
-                    logger.info(f"Mux completed: {ctx.scan_result.episode_path.name}", stage="mux", progress_current=current_idx, progress_total=total_episodes)
+                    logger.info(
+                        f"Mux completed: {ctx.scan_result.episode_path.name}",
+                        stage="mux",
+                        progress_current=current_idx,
+                        progress_total=total_episodes,
+                    )
                     return res_ctx
 
                 except Exception as e:
@@ -225,7 +262,12 @@ class PipelineRunner:
                     async with mux_counter_lock:
                         completed_mux_count += 1
                         current_idx = completed_mux_count
-                    logger.info(f"Mux failed: {ctx.scan_result.episode_path.name}", stage="mux", progress_current=current_idx, progress_total=total_episodes)
+                    logger.info(
+                        f"Mux failed: {ctx.scan_result.episode_path.name}",
+                        stage="mux",
+                        progress_current=current_idx,
+                        progress_total=total_episodes,
+                    )
                     return ctx.model_copy(
                         update={
                             "status": EpisodeStatus.FAILED,
@@ -319,7 +361,12 @@ class PipelineRunner:
             report_md = render_report(report)
             await self.filesystem.write_file_atomic(report_path, report_md)
 
-        logger.info("Pipeline completed successfully", stage="done", progress_current=len(scan_results), progress_total=len(scan_results))
+        logger.info(
+            "Pipeline completed successfully",
+            stage="done",
+            progress_current=len(scan_results),
+            progress_total=len(scan_results),
+        )
         return report
 
     async def _analyze_episode(
