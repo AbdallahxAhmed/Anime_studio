@@ -40,10 +40,24 @@ def test_font_asset_valid():
     assert asset.name == "Arial"
     assert asset.is_patched is False
     assert asset.patch_reason is None
+    assert asset.is_cacheable is True
+
+    # Test explicit is_cacheable=False
+    uncacheable_asset = FontAsset(
+        name="Arial",
+        file_path=Path("/fonts/arial.ttf"),
+        source="system",
+        layer_found=1,
+        cache_hit=False,
+        nameids={1: "Arial", 2: "Regular"},
+        is_cacheable=False,
+    )
+    assert uncacheable_asset.is_cacheable is False
 
     dumped = asset.model_dump(mode="json")
     assert dumped["file_path"] == "/fonts/arial.ttf"
     assert dumped["nameids"] == {"1": "Arial", "2": "Regular"}  # JSON stringifies keys
+    assert dumped["is_cacheable"] is True
 
 
 def test_font_asset_validation():

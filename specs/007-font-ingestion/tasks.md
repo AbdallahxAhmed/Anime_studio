@@ -20,8 +20,8 @@
 
 **Purpose**: Test fixtures and shared infrastructure needed by all phases
 
-- [ ] T001 Create sample font test fixtures in tests/fixtures/fonts/ (at minimum: one valid .ttf, one valid .otf, one corrupt/zero-byte .ttf)
-- [ ] T002 [P] Verify fonttools is available in dev environment by running `uv pip show fonttools`
+- [x] T001 Create sample font test fixtures in tests/fixtures/fonts/ (at minimum: one valid .ttf, one valid .otf, one corrupt/zero-byte .ttf)
+- [x] T002 [P] Verify fonttools is available in dev environment by running `uv pip show fonttools`
 
 ---
 
@@ -31,12 +31,12 @@
 
 **⚠️ CRITICAL**: All core services, hunters, and GUI code depend on these model changes.
 
-- [ ] T003 [P] Add `is_cacheable: bool = True` field to `FontAsset` model in src/models/font.py
-- [ ] T004 [P] Create `FontIngestionResult` frozen Pydantic model in src/models/ingestion.py with fields: `success_count: int`, `skipped_count: int`, `failed_count: int`, `failed_details: list[tuple[SerializablePath, str]]`, `source: str`
-- [ ] T005 [P] Add `LibraryScanOutput` frozen Pydantic model to src/models/pipeline.py with fields: `episodes: list[LibraryScanResult]`, `font_directories: list[SerializablePath] = Field(default_factory=list)`
-- [ ] T006 [P] Add unit tests for `is_cacheable` field default and serialization in tests/unit/models/test_font.py
-- [ ] T007 [P] Add unit tests for `FontIngestionResult` construction and frozen enforcement in tests/unit/models/test_ingestion.py
-- [ ] T008 [P] Add unit tests for `LibraryScanOutput` construction in tests/unit/models/test_pipeline_models.py
+- [x] T003 [P] Add `is_cacheable: bool = True` field to `FontAsset` model in src/models/font.py
+- [x] T004 [P] Create `FontIngestionResult` frozen Pydantic model in src/models/ingestion.py with fields: `success_count: int`, `skipped_count: int`, `failed_count: int`, `failed_details: list[tuple[SerializablePath, str]]`, `source: str`
+- [x] T005 [P] Add `LibraryScanOutput` frozen Pydantic model to src/models/pipeline.py with fields: `episodes: list[LibraryScanResult]`, `font_directories: list[SerializablePath] = Field(default_factory=list)`
+- [x] T006 [P] Add unit tests for `is_cacheable` field default and serialization in tests/unit/models/test_font.py
+- [x] T007 [P] Add unit tests for `FontIngestionResult` construction and frozen enforcement in tests/unit/models/test_ingestion.py
+- [x] T008 [P] Add unit tests for `LibraryScanOutput` construction in tests/unit/models/test_pipeline_models.py
 
 **Checkpoint**: `pytest tests/unit/models/test_font.py tests/unit/models/test_ingestion.py tests/unit/models/test_pipeline_models.py` — all pass. Models frozen, serializable, no I/O.
 

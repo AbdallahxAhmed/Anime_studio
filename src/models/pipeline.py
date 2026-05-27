@@ -38,3 +38,10 @@ class PipelineConfig(BaseModel):
     dry_run: bool = False
     sync_enabled: bool = False
     anime_title: str | None = None
+
+
+class LibraryScanOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    episodes: list[LibraryScanResult]
+    font_directories: list[SerializablePath] = Field(default_factory=list)

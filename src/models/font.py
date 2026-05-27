@@ -20,6 +20,7 @@ class FontAsset(BaseModel):
     layer_found: int = Field(ge=0, le=6)
     cache_hit: bool
     nameids: dict[int, str]
+    is_cacheable: bool = True
     is_patched: bool = False
     patch_reason: str | None = None
 

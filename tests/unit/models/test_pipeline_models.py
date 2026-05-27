@@ -1,7 +1,12 @@
 from pathlib import Path
 import pytest
 from pydantic import ValidationError
-from src.models.pipeline import LibraryScanResult, EpisodeContext, PipelineConfig
+from src.models.pipeline import (
+    LibraryScanResult,
+    EpisodeContext,
+    PipelineConfig,
+    LibraryScanOutput,
+)
 from src.models.report import EpisodeStatus
 
 
@@ -54,3 +59,41 @@ def test_pipeline_config_valid():
     # Immutability
     with pytest.raises(ValidationError):
         cfg.dry_run = False
+
+
+def test_library_scan_output_valid():
+    scan1 = LibraryScanResult(
+        episode_path=Path("/anime/ep1.mkv"),
+        subtitle_path=Path("/anime/ep1.ass"),
+        anime_title="My Anime",
+    )
+    scan2 = LibraryScanResult(
+        episode_path=Path("/anime/ep2.mkv"),
+        subtitle_path=Path("/anime/ep2.ass"),
+        anime_title="My Anime",
+    )
+
+    # Test default font_directories
+    output_default = LibraryScanOutput(episodes=[scan1, scan2])
+    assert output_default.episodes == [scan1, scan2]
+    assert output_default.font_directories == []
+
+    # Test explicit font_directories
+    output_explicit = LibraryScanOutput(
+        episodes=[scan1],
+        font_directories=[Path("/anime/Fonts"), Path("/anime/fonts2")],
+    )
+    assert output_explicit.episodes == [scan1]
+    assert output_explicit.font_directories == [
+        Path("/anime/Fonts"),
+        Path("/anime/fonts2"),
+    ]
+
+    # Test frozen immutability
+    with pytest.raises(ValidationError):
+        output_default.font_directories = [Path("/another")]
+
+    # Test JSON round-trip
+    dumped = output_explicit.model_dump(mode="json")
+    assert dumped["font_directories"] == ["/anime/Fonts", "/anime/fonts2"]
+    assert dumped["episodes"][0]["episode_path"] == "/anime/ep1.mkv"
