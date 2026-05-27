@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.signal_bridge.log_received.connect(self.activity_feed.add_entry)
         self.signal_bridge.progress_updated.connect(self.progress_panel.update_state)
         self.signal_bridge.pipeline_finished.connect(self.results_table.populate)
+        self.signal_bridge.result_added.connect(self.results_table.add_episode_result)
 
         # Wire library picker selection event to path handler
         self.library_picker.library_selected.connect(self._on_library_selected)

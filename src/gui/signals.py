@@ -15,3 +15,6 @@ class SignalBridge(QObject):
 
     # Emitted with a string error message when the pipeline fails
     pipeline_error = Signal(str)
+
+    # Emitted with an EpisodeResult when a single episode finishes in real-time
+    result_added = Signal(object)
