@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 from difflib import SequenceMatcher
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import structlog
 from src.models.pipeline import (
     EmbeddedTrack,
@@ -15,6 +15,7 @@ from src.models.subtitle import SubtitleSource
 
 if TYPE_CHECKING:
     from src.ports.mkvmerge import MkvmergePort
+    from src.models.pipeline import ShowNode
 
 logger = structlog.get_logger()
 
@@ -90,16 +91,31 @@ def signature(name: str) -> str:
     return re.sub(r"\bmovie\b|\b\d+\b", "", normalize(name)).strip()
 
 
+_AMUX_TEMP_RE = re.compile(r"^_amux_.*\.tmp\.\w+$", re.IGNORECASE)
+
+
 def _is_excluded(path: Path, base: Path) -> bool:
-    """Return True if any path component relative to base starts with '.'."""
+    """Return True if any path component relative to base starts with '.' or if the filename matches the _amux_ temp file pattern."""
     try:
         relative = path.relative_to(base)
     except ValueError:
         return False
-    return any(part.startswith(".") for part in relative.parts)
+    if any(part.startswith(".") for part in relative.parts):
+        return True
+    if _AMUX_TEMP_RE.match(path.name):
+        return True
+    return False
 
 
-def _parse_embedded_info(identify_result: dict) -> EmbeddedSubInfo | None:
+def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
+    try:
+        descendant.relative_to(ancestor)
+        return True
+    except ValueError:
+        return False
+
+
+def _parse_embedded_info(identify_result: dict[str, Any]) -> EmbeddedSubInfo | None:
     """Parse mkvmerge -J output into EmbeddedSubInfo.
 
     Returns None if no ASS/SSA subtitle tracks are found.
@@ -158,6 +174,91 @@ class LibraryScanner:
     def __init__(self, mkvmerge: "MkvmergePort | None" = None) -> None:
         self._mkvmerge = mkvmerge
 
+    def _build_show_tree(
+        self, lib_path: Path, scan_results: list[LibraryScanResult]
+    ) -> list["ShowNode"]:
+        from src.models.pipeline import ShowNode, SubFolderNode, EpisodeContext
+
+        episodes_by_path = {
+            ep.episode_path: EpisodeContext(scan_result=ep) for ep in scan_results
+        }
+
+        show_nodes = []
+        try:
+            top_dirs = sorted(
+                [d for d in lib_path.iterdir() if d.is_dir() and not _is_excluded(d, lib_path)],
+                key=lambda d: d.name,
+            )
+        except Exception:
+            return []
+
+        for show_dir in top_dirs:
+            resolved_show = show_dir.resolve()
+            sub_folders = []
+            try:
+                sub_dirs = sorted(
+                    [d for d in show_dir.iterdir() if d.is_dir() and not _is_excluded(d, lib_path)],
+                    key=lambda d: d.name,
+                )
+            except Exception:
+                sub_dirs = []
+
+            for sub_dir in sub_dirs:
+                resolved_sub = sub_dir.resolve()
+                sub_episodes = tuple(
+                    ep_ctx for ep_path, ep_ctx in episodes_by_path.items()
+                    if ep_path.parent == resolved_sub or _is_ancestor(resolved_sub, ep_path)
+                )
+                if sub_episodes:
+                    sub_folders.append(
+                        SubFolderNode(
+                            name=sub_dir.name,
+                            path=resolved_sub,
+                            episodes=sub_episodes,
+                        )
+                    )
+
+            direct_episodes = tuple(
+                ep_ctx for ep_path, ep_ctx in episodes_by_path.items()
+                if ep_path.parent == resolved_show
+            )
+
+            if direct_episodes or sub_folders:
+                show_nodes.append(
+                    ShowNode(
+                        name=show_dir.name,
+                        path=resolved_show,
+                        sub_folders=tuple(sub_folders),
+                        episodes=direct_episodes,
+                    )
+                )
+
+        return show_nodes
+
+    async def scan_folder(self, folder_path: Path) -> LibraryScanOutput:
+        """Scan a single show folder without touching the full library."""
+        lib_path = Path(folder_path).resolve()
+
+        # Phase 1: Filesystem walk — match external .ass files
+        phase1_results, font_dirs, unmatched_mkvs = await asyncio.to_thread(
+            self._phase1_walk, lib_path
+        )
+
+        # Phase 2: Embedded detection for unmatched MKVs (async)
+        phase2_results = []
+        if self._mkvmerge and unmatched_mkvs:
+            phase2_results = await self._phase2_embedded_detection(
+                unmatched_mkvs, lib_path
+            )
+
+        all_results = phase1_results + phase2_results
+        sorted_results = sorted(all_results, key=lambda r: r.episode_path.name)
+        return LibraryScanOutput(
+            episodes=sorted_results,
+            font_directories=sorted(list(font_dirs)),
+            show_tree=(),
+        )
+
     async def scan(self, library_path: Path) -> LibraryScanOutput:
         """Scan the library_path for MKV files, matching ASS subtitle
         siblings, Fonts directories, and embedded subtitle tracks."""
@@ -177,9 +278,12 @@ class LibraryScanner:
             )
 
         all_results = phase1_results + phase2_results
+        sorted_results = sorted(all_results, key=lambda r: r.episode_path.name)
+        show_tree = await asyncio.to_thread(self._build_show_tree, lib_path, sorted_results)
         return LibraryScanOutput(
-            episodes=sorted(all_results, key=lambda r: r.episode_path.name),
+            episodes=sorted_results,
             font_directories=sorted(list(font_dirs)),
+            show_tree=tuple(show_tree),
         )
 
     def _phase1_walk(
@@ -352,7 +456,8 @@ class LibraryScanner:
         Runs up to 4 concurrent mkvmerge identify calls to avoid spawning
         too many subprocesses.
         """
-        assert self._mkvmerge is not None
+        mkvmerge = self._mkvmerge
+        assert mkvmerge is not None
 
         results: list[LibraryScanResult] = []
         semaphore = asyncio.Semaphore(4)
@@ -362,7 +467,7 @@ class LibraryScanner:
         ) -> LibraryScanResult | None:
             async with semaphore:
                 try:
-                    identify_result = await self._mkvmerge.identify(mkv_path)
+                    identify_result = await mkvmerge.identify(mkv_path)
                 except Exception as e:
                     logger.warning(
                         "mkvmerge identify failed for embedded sub detection",
