@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from src.models._types import SerializablePath
 from src.models.font import FontQuery, FontAsset
@@ -5,6 +8,25 @@ from src.models.subtitle import SubtitleSource, SyncResult
 from src.models.mux import MuxJob, MuxResult
 from src.models.trash import TrashReceipt
 from src.models.report import EpisodeStatus
+
+
+class ShowStatus(StrEnum):
+    PENDING      = "pending"
+    PROCESSING   = "processing"
+    READY        = "ready"
+    ALL_DONE     = "all_done"
+    NO_SUBTITLE  = "no_subtitle"
+    WARNING      = "warning"
+
+
+@dataclass(frozen=True)
+class ShowSummary:
+    name: str
+    path: Path
+    status: ShowStatus
+    episode_count: int
+    processed_count: int
+    subtitle_text: str
 
 
 class EmbeddedTrack(BaseModel):
@@ -63,6 +85,31 @@ class EpisodeContext(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class SubFolderNode:
+    name: str           # "Season 1", "Movies", etc.
+    path: Path
+    episodes: tuple[EpisodeContext, ...]
+
+    @property
+    def total_count(self) -> int:
+        return len(self.episodes)
+
+
+@dataclass(frozen=True)
+class ShowNode:
+    name: str           # "Hunter x Hunter"
+    path: Path
+    sub_folders: tuple[SubFolderNode, ...]
+    episodes: tuple[EpisodeContext, ...]  # direct episodes (no sub-folder)
+
+    @property
+    def total_count(self) -> int:
+        return len(self.episodes) + sum(
+            sf.total_count for sf in self.sub_folders
+        )
+
+
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -70,6 +117,7 @@ class PipelineConfig(BaseModel):
     dry_run: bool = False
     sync_enabled: bool = False
     anime_title: str | None = None
+    selected_paths: frozenset[Path] | None = None
 
 
 class LibraryScanOutput(BaseModel):
@@ -77,3 +125,4 @@ class LibraryScanOutput(BaseModel):
 
     episodes: list[LibraryScanResult]
     font_directories: list[SerializablePath] = Field(default_factory=list)
+    show_tree: tuple[ShowNode, ...] = ()

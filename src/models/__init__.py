@@ -12,8 +12,11 @@ from src.models.pipeline import (
     EpisodeContext,
     PipelineConfig,
     LibraryScanOutput,
+    ShowStatus,
+    ShowSummary,
 )
 from src.models.ingestion import FontIngestionResult
+from src.models.run_manifest import EpisodeProcessed, RunManifest, PipelineCheckpoint
 
 __all__ = [
     "SerializablePath",
@@ -39,4 +42,9 @@ __all__ = [
     "PipelineConfig",
     "LibraryScanOutput",
     "FontIngestionResult",
+    "EpisodeProcessed",
+    "RunManifest",
+    "PipelineCheckpoint",
+    "ShowStatus",
+    "ShowSummary",
 ]
