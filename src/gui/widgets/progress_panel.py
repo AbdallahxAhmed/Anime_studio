@@ -55,46 +55,59 @@ class ProgressPanelWidget(QWidget):
 
         elif state.stage == ProgressStage.SCANNING:
             self.setVisible(True)
-            self.status_label.setText(state.status_text or "Scanning library...")
-            # Set to indeterminate mode (min=0, max=0)
+            self.set_status(state.status_text or "Scanning library...")
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setStyleSheet("")
 
         elif state.stage == ProgressStage.MUXING:
-            self.setVisible(True)
-            self.progress_bar.setStyleSheet("")
             if state.current is not None and state.total is not None:
-                self.progress_bar.setRange(0, state.total)
-                self.progress_bar.setValue(state.current)
-                self.status_label.setText(
+                self.set_progress(state.current, state.total)
+                self.set_status(
                     state.status_text
                     or f"Muxing episode {state.current} of {state.total}..."
                 )
             else:
-                self.progress_bar.setRange(0, 100)
-                self.progress_bar.setValue(0)
-                self.status_label.setText(state.status_text or "Muxing episodes...")
+                self.set_progress(0, 100)
+                self.set_status(state.status_text or "Muxing episodes...")
 
         elif state.stage == ProgressStage.COMPLETE:
-            self.setVisible(True)
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(100)
-            self.status_label.setText(
+            self.set_complete()
+            self.set_status(
                 state.status_text or "Forensics pipeline completed successfully!"
-            )
-            # Premium Green styling for complete status
-            self.progress_bar.setStyleSheet(
-                "QProgressBar { border: 1px solid #4CAF50; border-radius: 4px; text-align: center; }"
-                "QProgressBar::chunk { background-color: #4CAF50; }"
             )
 
         elif state.stage == ProgressStage.ERROR:
-            self.setVisible(True)
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(100)
-            self.status_label.setText(state.status_text or "Forensics pipeline failed!")
-            # Premium Red styling for error status
-            self.progress_bar.setStyleSheet(
-                "QProgressBar { border: 1px solid #F44336; border-radius: 4px; text-align: center; }"
-                "QProgressBar::chunk { background-color: #F44336; }"
-            )
+            self.set_error()
+            self.set_status(state.status_text or "Forensics pipeline failed!")
+
+    def set_progress(self, value: int, max_val: int) -> None:
+        """Set the determinate range and current value."""
+        self.setVisible(True)
+        self.progress_bar.setStyleSheet("")
+        self.progress_bar.setRange(0, max_val)
+        self.progress_bar.setValue(value)
+
+    def set_status(self, text: str) -> None:
+        """Set the text displayed in the status label."""
+        self.status_label.setText(text)
+
+    def set_complete(self) -> None:
+        """Apply green success styling."""
+        self.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar { border: 1px solid #4CAF50; border-radius: 4px; text-align: center; }"
+            "QProgressBar::chunk { background-color: #4CAF50; }"
+        )
+
+    def set_error(self) -> None:
+        """Apply red error styling."""
+        self.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar { border: 1px solid #F44336; border-radius: 4px; text-align: center; }"
+            "QProgressBar::chunk { background-color: #F44336; }"
+        )
+

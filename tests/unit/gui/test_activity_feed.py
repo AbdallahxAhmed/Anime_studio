@@ -61,3 +61,33 @@ def test_activity_feed_clear() -> None:
 
     feed.clear_button.click()
     assert feed.log_display.toPlainText() == ""
+
+
+def test_activity_feed_collapsed_state_by_default() -> None:
+    """Verify that ActivityFeedWidget is collapsed by default (maximumHeight == 36)."""
+    feed = ActivityFeedWidget()
+    assert feed.maximumHeight() == 36
+    assert feed._is_collapsed is True
+
+
+def test_activity_feed_toggle_expand_and_collapse() -> None:
+    """Verify that toggle_collapsed() expands to 160px and collapses back to 36px."""
+    feed = ActivityFeedWidget()
+    
+    # Expand
+    feed.toggle_collapsed()
+    assert feed.maximumHeight() == 160
+    assert feed._is_collapsed is False
+
+    # Collapse
+    feed.toggle_collapsed()
+    assert feed.maximumHeight() == 36
+    assert feed._is_collapsed is True
+
+
+def test_activity_feed_update_summary() -> None:
+    """Verify update_summary() changes the summary label text."""
+    feed = ActivityFeedWidget()
+    feed.update_summary("Last event message")
+    assert feed.summary_label.text() == "Last event message"
+
