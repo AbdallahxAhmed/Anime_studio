@@ -1,5 +1,8 @@
 <!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
-at specs/007-font-ingestion/plan.md
+Before working on Anime Studio v3, read:
+- .specify/memory/constitution.md
+- COMPACT_STATE.md
+- specs/011-gui-redesign/plan.md
+
+The Constitution is authoritative. Never edit it directly; propose amendments as text for maintainer approval.
 <!-- SPECKIT END -->
