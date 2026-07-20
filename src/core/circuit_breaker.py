@@ -14,6 +14,13 @@ class CircuitBreakerState(StrEnum):
 class CircuitBreaker:
     """In-memory state machine tracking failure counts for rate/circuit control."""
 
+    _state: CircuitBreakerState
+    _failure_count: int
+    _threshold: int
+    _cooldown_s: float
+    _last_failure_time: float | None
+    _hunter_name: str
+
     __slots__ = (
         "_state",
         "_failure_count",

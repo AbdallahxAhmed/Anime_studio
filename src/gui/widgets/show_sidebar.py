@@ -1,9 +1,18 @@
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
+from PySide6.QtGui import (
+    QIcon,
+    QPixmap,
+    QPainter,
+    QColor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+)
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -17,8 +26,11 @@ class ShowSidebarWidget(QWidget):
 
     show_selected = Signal(str, Path)  # (show_name, folder_path)
     add_folder_requested = Signal(object)  # Emits Path or None
+    refresh_requested = Signal()  # Emits when explicit Refresh is requested
 
-    def __init__(self, signal_bridge: SignalBridge, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, signal_bridge: SignalBridge, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self._signal_bridge = signal_bridge
         self.setFixedWidth(220)
@@ -32,9 +44,29 @@ class ShowSidebarWidget(QWidget):
         self._list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self._list_widget)
 
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(5)
+
         self._add_btn = QPushButton("Add folder", self)
         self._add_btn.clicked.connect(self._on_add_clicked)
-        layout.addWidget(self._add_btn)
+        btn_layout.addWidget(self._add_btn)
+
+        self._refresh_btn = QPushButton("↻", self)
+        self._refresh_btn.setToolTip("Refresh Library Index (Full Rescan)")
+        self._refresh_btn.setFixedWidth(32)
+        self._refresh_btn.clicked.connect(self._on_refresh_clicked)
+        btn_layout.addWidget(self._refresh_btn)
+
+        layout.addLayout(btn_layout)
+
+    def set_refresh_enabled(self, enabled: bool) -> None:
+        """Enable or disable the refresh button."""
+        self._refresh_btn.setEnabled(enabled)
+
+    def is_refresh_enabled(self) -> bool:
+        """Return whether the refresh button is enabled."""
+        return self._refresh_btn.isEnabled()
 
     def populate(self, shows: list[ShowSummary]) -> None:
         """Populate the sidebar with list of shows."""
@@ -85,6 +117,9 @@ class ShowSidebarWidget(QWidget):
     def _on_add_clicked(self) -> None:
         self.add_folder_requested.emit(None)
 
+    def _on_refresh_clicked(self) -> None:
+        self.refresh_requested.emit()
+
     def _get_status_icon(self, status: ShowStatus) -> QIcon:
         """Draw a status icon circle using QPainter."""
         pixmap = QPixmap(16, 16)
@@ -110,7 +145,7 @@ class ShowSidebarWidget(QWidget):
 
         return QIcon(pixmap)
 
-    def dragEnterEvent(self, event: any) -> None:
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 p = Path(url.toLocalFile())
@@ -119,10 +154,10 @@ class ShowSidebarWidget(QWidget):
                     return
         event.ignore()
 
-    def dragMoveEvent(self, event: any) -> None:
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         event.acceptProposedAction()
 
-    def dropEvent(self, event: any) -> None:
+    def dropEvent(self, event: QDropEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 p = Path(url.toLocalFile())

@@ -1,4 +1,4 @@
-from typing import Iterator
+from typing import Any, Iterator, cast
 import structlog
 from src.ports.font_hunter import HunterProtocol
 from src.core.circuit_breaker import CircuitBreaker
@@ -16,7 +16,7 @@ class HunterRegistry:
 
     def register(self, hunter: HunterProtocol) -> None:
         """Register a valid hunter protocol conforming object. Rejects duplicates."""
-        if not isinstance(hunter, HunterProtocol):
+        if not isinstance(cast(Any, hunter), HunterProtocol):
             logger.error(
                 "Registry rejected non-conforming hunter object", hunter=hunter
             )

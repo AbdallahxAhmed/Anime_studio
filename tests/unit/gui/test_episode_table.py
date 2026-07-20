@@ -2,9 +2,9 @@ import pytest
 from pathlib import Path
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtGui import QPainter, QPixmap, QBrush, QColor
+from PySide6.QtGui import QColor
 from src.models.pipeline import LibraryScanResult
-from src.gui.widgets.episode_table import EpisodeTableWidget, EpisodeTableModel, StatusBadgeDelegate
+from src.gui.widgets.episode_table import EpisodeTableWidget, StatusBadgeDelegate
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -95,7 +95,7 @@ def test_table_selection_changed_signal(mocker) -> None:
 def test_table_badge_pending_color(mocker) -> None:
     """6. Status 'pending' row shows amber in delegate (mock QPainter)."""
     delegate = StatusBadgeDelegate()
-    
+
     # Mock model index returning "pending"
     mock_index = mocker.MagicMock(spec=QModelIndex)
     mock_index.column.return_value = 3
@@ -119,7 +119,7 @@ def test_table_badge_pending_color(mocker) -> None:
 def test_table_badge_skipped_color(mocker) -> None:
     """7. Status 'skipped' row shows gray."""
     delegate = StatusBadgeDelegate()
-    
+
     # Mock model index returning "skipped"
     mock_index = mocker.MagicMock(spec=QModelIndex)
     mock_index.column.return_value = 3
@@ -139,11 +139,11 @@ def test_table_badge_skipped_color(mocker) -> None:
     assert called_color == QColor("#888888")
 
 
-def test_table_update_episode_status() -> None:
-    """8. update_episode_status() changes status for correct path."""
+def test_table_update_episode_status(tmp_path: Path) -> None:
+    """8. update_episode_status() changes status for correct full path using tmp_path."""
     table = EpisodeTableWidget()
-    path1 = Path("D:/Anime/show/ep1.mkv")
-    path2 = Path("D:/Anime/show/ep2.mkv")
+    path1 = tmp_path / "show" / "ep1.mkv"
+    path2 = tmp_path / "show" / "ep2.mkv"
     episodes = [
         LibraryScanResult(episode_path=path1, anime_title="Show"),
         LibraryScanResult(episode_path=path2, anime_title="Show"),
@@ -153,3 +153,33 @@ def test_table_update_episode_status() -> None:
     table.update_episode_status(path1, "muxed")
     assert table._model.data(table._model.index(0, 3)) == "muxed"
     assert table._model.data(table._model.index(1, 3)) == "skipped"  # Unchanged
+
+
+def test_table_update_status_same_filename_different_directories(
+    tmp_path: Path,
+) -> None:
+    """Regression test: duplicate filenames in different directories do not collide."""
+    table = EpisodeTableWidget()
+    path_s1 = tmp_path / "Season 1" / "episode01.mkv"
+    path_s2 = tmp_path / "Season 2" / "episode01.mkv"
+
+    episodes = [
+        LibraryScanResult(
+            episode_path=path_s1,
+            subtitle_path=tmp_path / "Season 1" / "episode01.ass",
+            anime_title="Show S1",
+        ),
+        LibraryScanResult(
+            episode_path=path_s2,
+            subtitle_path=tmp_path / "Season 2" / "episode01.ass",
+            anime_title="Show S2",
+        ),
+    ]
+    table.populate(episodes)
+
+    # Update Season 2 episode01.mkv only
+    table.update_episode_status(path_s2, "complete")
+
+    # Season 1 episode01.mkv must remain pending, Season 2 episode01.mkv updated
+    assert table._model.data(table._model.index(0, 3)) == "pending"
+    assert table._model.data(table._model.index(1, 3)) == "complete"

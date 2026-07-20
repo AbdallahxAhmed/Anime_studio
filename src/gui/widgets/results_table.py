@@ -1,6 +1,6 @@
 import logging
 from typing import Any
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPersistentModelIndex, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -25,10 +25,14 @@ class ResultsTableModel(QAbstractTableModel):
         self.results: list[EpisodeResult] = []
         self.headers = ["Episode", "Status", "Fonts Found", "Fonts Missing", "Details"]
 
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+    def rowCount(
+        self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()
+    ) -> int:
         return len(self.results)
 
-    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+    def columnCount(
+        self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()
+    ) -> int:
         return len(self.headers)
 
     def headerData(
@@ -44,7 +48,11 @@ class ResultsTableModel(QAbstractTableModel):
             return self.headers[section]
         return None
 
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+    def data(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ) -> Any:
         if not index.isValid() or not (0 <= index.row() < len(self.results)):
             return None
 
@@ -173,7 +181,7 @@ class ResultsTableWidget(QWidget):
         if isinstance(run_result, PipelineRunResult):
             self.model.set_results(run_result.episodes)
         else:
-            logger.warning(f"Invalid populate format: {type(run_result)}")
+            logger.warning(f"Invalid populate format: {type(run_result)}")  # type: ignore[unreachable]  # runtime fallback for untyped callers
 
     def clear_results(self) -> None:
         """Clear all rows in the results table."""

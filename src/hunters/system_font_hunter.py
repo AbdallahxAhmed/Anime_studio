@@ -104,7 +104,7 @@ WEIGHT_SYNONYMS = {
 
 class SystemFontHunter:
     name: str = "SystemFontHunter"
-    priority: int = 4
+    priority: int = 3
     rate_limit: float = 0.0
     circuit_breaker_threshold: int = 3
     ping_url: str | None = None
@@ -157,13 +157,18 @@ class SystemFontHunter:
         indexed_count = 0
 
         for d in dirs:
+            logger.debug(f"Scanning dir: {d}")
             if not d.exists():
                 logger.debug("System font directory does not exist", path=str(d))
+                logger.debug(f"No match in {d}")
                 continue
 
+            found_any = False
             try:
                 for p in d.rglob("*"):
                     if p.is_file() and p.suffix.lower() in FONT_EXTENSIONS:
+                        found_any = True
+                        logger.debug(f"Candidate found: {p}")
                         if p.suffix.lower() == ".ttc":
                             try:
                                 from fontTools.ttLib import TTCollection
@@ -226,12 +231,16 @@ class SystemFontHunter:
                                             nameids,
                                         )
                                 indexed_count += 1
+                if not found_any:
+                    logger.debug(f"No match in {d}")
             except Exception as e:
                 logger.warning(
                     "Error scanning system font directory",
                     path=str(d),
                     error=str(e),
                 )
+                if not found_any:
+                    logger.debug(f"No match in {d}")
 
         duration = time.perf_counter() - start_time
         logger.info(
@@ -243,6 +252,7 @@ class SystemFontHunter:
 
     async def search(self, query: FontQuery) -> list[HunterResult]:
         """Search system fonts for a match with progressive normalization tiers."""
+        logger.debug(f"SystemFontHunter called with query={query.requested_name}")
         if not self._index_built:
             await asyncio.to_thread(self._build_index)
 
@@ -253,11 +263,13 @@ class SystemFontHunter:
         if requested in self._index:
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             result = self._make_result(requested, query, duration_ms)
+            asset = result.font_asset
+            assert asset is not None
             logger.info(
                 "System font match found (tier 1: exact)",
                 requested_name=query.requested_name,
-                matched_name=result.font_asset.name,
-                path=str(result.font_asset.file_path),
+                matched_name=asset.name,
+                path=str(asset.file_path),
             )
             return [result]
 
@@ -266,11 +278,13 @@ class SystemFontHunter:
         if normalized != requested and normalized in self._index:
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             result = self._make_result(normalized, query, duration_ms)
+            asset = result.font_asset
+            assert asset is not None
             logger.info(
                 "System font match found (tier 2: stripped suffix)",
                 requested_name=query.requested_name,
-                matched_name=result.font_asset.name,
-                path=str(result.font_asset.file_path),
+                matched_name=asset.name,
+                path=str(asset.file_path),
             )
             return [result]
 
@@ -280,11 +294,13 @@ class SystemFontHunter:
             if candidate in self._index:
                 duration_ms = (time.perf_counter() - start_time) * 1000.0
                 result = self._make_result(candidate, query, duration_ms)
+                asset = result.font_asset
+                assert asset is not None
                 logger.info(
                     "System font match found (tier 3: appended suffix)",
                     requested_name=query.requested_name,
-                    matched_name=result.font_asset.name,
-                    path=str(result.font_asset.file_path),
+                    matched_name=asset.name,
+                    path=str(asset.file_path),
                 )
                 return [result]
 
@@ -296,11 +312,13 @@ class SystemFontHunter:
                     if candidate in self._index:
                         duration_ms = (time.perf_counter() - start_time) * 1000.0
                         result = self._make_result(candidate, query, duration_ms)
+                        asset = result.font_asset
+                        assert asset is not None
                         logger.info(
                             "System font match found (tier 4: weight synonym)",
                             requested_name=query.requested_name,
-                            matched_name=result.font_asset.name,
-                            path=str(result.font_asset.file_path),
+                            matched_name=asset.name,
+                            path=str(asset.file_path),
                         )
                         return [result]
 

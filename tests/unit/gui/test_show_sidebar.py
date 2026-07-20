@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from PySide6.QtWidgets import QApplication, QListWidgetItem
+from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from src.models.pipeline import ShowSummary, ShowStatus
 from src.gui.signals import SignalBridge
@@ -77,7 +77,9 @@ def test_sidebar_show_selected_signal(mocker) -> None:
     item = sidebar._list_widget.item(0)
     sidebar._on_item_clicked(item)
 
-    mock_slot.assert_called_once_with("Wistoria Season 2", Path("D:/Entertainment/Anime/Wistoria Season 2"))
+    mock_slot.assert_called_once_with(
+        "Wistoria Season 2", Path("D:/Entertainment/Anime/Wistoria Season 2")
+    )
 
 
 def test_sidebar_update_show_status() -> None:
@@ -107,7 +109,7 @@ def test_sidebar_status_icon_color_check() -> None:
     """5. ALL_DONE shows green icon (QPainter color check)."""
     bridge = SignalBridge()
     sidebar = ShowSidebarWidget(signal_bridge=bridge)
-    
+
     icon = sidebar._get_status_icon(ShowStatus.ALL_DONE)
     pixmap = icon.pixmap(16, 16)
     image = pixmap.toImage()

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 import time
+from typing import Any, Literal
 from pathlib import Path
 import shutil
 import structlog
@@ -22,6 +23,14 @@ from src.config import AppConfig
 from src.errors import FontMatchError
 
 logger = structlog.get_logger()
+
+
+def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
+    try:
+        descendant.relative_to(ancestor)
+        return True
+    except ValueError:
+        return False
 
 
 class PipelineRunner:
@@ -46,7 +55,13 @@ class PipelineRunner:
         self.library_scanner = library_scanner
         self._analysis_lock = asyncio.Lock()
 
-    async def run(self, pipeline_config: PipelineConfig) -> PipelineReport:
+    async def run(
+        self,
+        pipeline_config: PipelineConfig,
+        stop_event: asyncio.Event | None = None,
+        checkpoint_manager: Any | None = None,
+        undo_service: Any | None = None,
+    ) -> PipelineReport:
         """Run the full library pipeline: scan, repair, resolve fonts, timing sync, plan mux, dispatch mux, trash, report."""
         start_time = time.perf_counter()
         run_timestamp = datetime.now(timezone.utc)
@@ -60,6 +75,45 @@ class PipelineRunner:
         )
         scan_output = await self.library_scanner.scan(pipeline_config.library_path)
         scan_results = scan_output.episodes
+
+        completed_from_checkpoint = set()
+        if checkpoint_manager:
+            checkpoint = await checkpoint_manager.load()
+            if (
+                checkpoint
+                and Path(checkpoint.library_path).resolve()
+                == Path(pipeline_config.library_path).resolve()
+            ):
+                completed_from_checkpoint = set(checkpoint.completed_episodes)
+                logger.info(
+                    f"Resuming pipeline, skipping {len(completed_from_checkpoint)} completed episodes"
+                )
+
+        if completed_from_checkpoint:
+            scan_results = [
+                ep
+                for ep in scan_results
+                if str(ep.episode_path) not in completed_from_checkpoint
+            ]
+
+        if pipeline_config.selected_paths is not None:
+            selected = pipeline_config.selected_paths
+            original_count = len(scan_results)
+            scan_results = [
+                ep
+                for ep in scan_results
+                if (
+                    ep.episode_path.parent in selected
+                    or ep.episode_path.parent.parent in selected
+                )
+            ]
+            logger.info(
+                "Filtered episodes by selected paths",
+                selected_count=len(scan_results),
+                total_count=original_count,
+                selected_paths_count=len(selected),
+            )
+
         font_dirs = scan_output.font_directories
         logger.info(
             f"Library scan complete. Found {len(scan_results)} episodes.",
@@ -142,11 +196,31 @@ class PipelineRunner:
                 external_scans.append(scan)
 
         episode_contexts = []
-        for scan in external_scans:
+        stopped_scans = []
+        for i, scan in enumerate(external_scans):
+            if stop_event and stop_event.is_set():
+                logger.info("Pipeline stopped by user")
+                stopped_scans = external_scans[i:]
+                break
             ctx = await self._analyze_episode(
                 scan, anime_title, pipeline_config, run_timestamp
             )
             episode_contexts.append(ctx)
+            if checkpoint_manager:
+                from src.models.run_manifest import PipelineCheckpoint
+
+                completed_list = list(completed_from_checkpoint) + [
+                    str(c.scan_result.episode_path) for c in episode_contexts
+                ]
+                checkpoint = PipelineCheckpoint(
+                    library_path=str(pipeline_config.library_path),
+                    completed_episodes=tuple(completed_list),
+                    timestamp=run_timestamp.isoformat(),
+                    selected_paths=tuple(
+                        str(sp) for sp in (pipeline_config.selected_paths or ())
+                    ),
+                )
+                await checkpoint_manager.save(checkpoint)
 
         # 3. Concurrent Mux Concurrency Semaphore
         mux_semaphore = self.disk_semaphore
@@ -227,20 +301,19 @@ class PipelineRunner:
 
                     if not pipeline_config.dry_run:
                         # Perform trash moves
-                        await self.filesystem.move_to_trash(
-                            ctx.scan_result.subtitle_path, sub_trash
-                        )
+                        sub_path = ctx.scan_result.subtitle_path
+                        assert sub_path is not None
+                        await self.filesystem.move_to_trash(sub_path, sub_trash)
                         await self.filesystem.move_to_trash(
                             ctx.scan_result.episode_path, mkv_trash
                         )
                         # Atomic replace original MKV with temporary muxed file
+                        assert ctx.mux_job is not None
                         await self.filesystem.replace_file(
                             ctx.mux_job.output_path, ctx.scan_result.episode_path
                         )
                         # Cleanup temp ASS file if exists
-                        temp_sub_path = ctx.scan_result.subtitle_path.with_name(
-                            f"{ctx.scan_result.subtitle_path.stem}.tmp.ass"
-                        )
+                        temp_sub_path = sub_path.with_name(f"{sub_path.stem}.tmp.ass")
                         if temp_sub_path.exists():
                             try:
                                 temp_sub_path.unlink()
@@ -299,9 +372,12 @@ class PipelineRunner:
                         }
                     )
 
-        # Dispatch mux operations concurrently
-        mux_tasks = [_mux_and_post_process(ctx) for ctx in episode_contexts]
-        final_contexts = await asyncio.gather(*mux_tasks)
+        if stop_event and stop_event.is_set():
+            final_contexts = list(episode_contexts)
+        else:
+            # Dispatch mux operations concurrently
+            mux_tasks = [_mux_and_post_process(ctx) for ctx in episode_contexts]
+            final_contexts = await asyncio.gather(*mux_tasks)
 
         # Build reports list
         episode_reports = []
@@ -314,6 +390,14 @@ class PipelineRunner:
                     mux_result=ctx.mux_result,
                     missing_fonts=ctx.missing_fonts,
                     applied_rules=ctx.errors,  # Store errors/applied rules context
+                )
+            )
+
+        for scan in stopped_scans:
+            episode_reports.append(
+                EpisodeReport(
+                    episode_path=scan.episode_path,
+                    status=EpisodeStatus.SKIPPED,
                 )
             )
 
@@ -366,7 +450,7 @@ class PipelineRunner:
 
         if report_path.is_file() and len(scan_results) < len(all_mkvs):
             # Read existing report
-            def _read_report():
+            def _read_report() -> str:
                 with open(report_path, "r", encoding="utf-8") as f:
                     return f.read()
 
@@ -386,6 +470,43 @@ class PipelineRunner:
             report_md = render_report(report)
             await self.filesystem.write_file_atomic(report_path, report_md)
 
+        # Write RunManifest on completion (normal or stopped)
+        if undo_service and final_contexts:
+            from src.models.run_manifest import RunManifest, EpisodeProcessed
+
+            manifest_episodes = []
+            for ctx in final_contexts:
+                # Map EpisodeStatus to "success", "skipped", "failed"
+                status: Literal["success", "skipped", "failed"]
+                if ctx.status in (EpisodeStatus.COMPLETE, EpisodeStatus.PARTIAL):
+                    status = "success"
+                elif ctx.status == EpisodeStatus.SKIPPED:
+                    status = "skipped"
+                else:
+                    status = "failed"
+                trash_path = (
+                    ctx.trash_receipts[0].trash_path if ctx.trash_receipts else None
+                )
+                manifest_episodes.append(
+                    EpisodeProcessed(
+                        episode_path=str(ctx.scan_result.episode_path),
+                        trash_receipt_path=str(trash_path) if trash_path else None,
+                        show_name=ctx.scan_result.anime_title,
+                        status=status,
+                    )
+                )
+            manifest = RunManifest(
+                run_id=undo_service.create_manifest_id(),
+                timestamp=run_timestamp.isoformat(),
+                library_path=str(pipeline_config.library_path),
+                episodes_processed=tuple(manifest_episodes),
+            )
+            await undo_service.save_manifest(manifest)
+
+        # Clear checkpoint on normal (not stopped) completion
+        if checkpoint_manager and not (stop_event and stop_event.is_set()):
+            await checkpoint_manager.clear()
+
         logger.info(
             "Pipeline completed successfully",
             stage="done",
@@ -403,6 +524,13 @@ class PipelineRunner:
     ) -> EpisodeContext:
         """Run sequential timing repair, timing sync fallback, font extraction, font resolution, and mux planning for one episode."""
         ctx = EpisodeContext(scan_result=scan, status=EpisodeStatus.FAILED)
+        if scan.subtitle_path is None:
+            return ctx.model_copy(
+                update={
+                    "status": EpisodeStatus.FAILED,
+                    "errors": ["No subtitle path found for repair."],
+                }
+            )
 
         async with self._analysis_lock:
             # 1. Timing check/repair
@@ -455,7 +583,7 @@ class PipelineRunner:
                     # Sync succeeded, read back the synced subtitle if not dry_run
                     if not pipeline_config.dry_run:
 
-                        def _read_synced():
+                        def _read_synced() -> str:
                             with open(temp_sub_path, "r", encoding="utf-8") as f:
                                 return f.read()
 
@@ -538,12 +666,12 @@ class PipelineRunner:
         if alass_available:
             from src.adapters.alass import AlassAdapter
 
-            adapter = AlassAdapter(self.subprocess_adapter)
+            alass_adapter = AlassAdapter(self.subprocess_adapter)
             logger.info(
                 "attempting subtitle sync via alass", subtitle=subtitle_ass.name
             )
             try:
-                res = await adapter.sync(
+                res = await alass_adapter.sync(
                     reference_mkv,
                     subtitle_ass,
                     output_ass,
@@ -574,12 +702,12 @@ class PipelineRunner:
         if ffsubsync_available:
             from src.adapters.ffsubsync import FfsubsyncAdapter
 
-            adapter = FfsubsyncAdapter(self.subprocess_adapter)
+            ff_adapter = FfsubsyncAdapter(self.subprocess_adapter)
             logger.info(
                 "attempting subtitle sync via ffsubsync", subtitle=subtitle_ass.name
             )
             try:
-                res = await adapter.sync(
+                res = await ff_adapter.sync(
                     reference_mkv,
                     subtitle_ass,
                     output_ass,

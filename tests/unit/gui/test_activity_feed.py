@@ -24,11 +24,35 @@ def test_activity_feed_initial_state() -> None:
 def test_activity_feed_add_entries() -> None:
     """Verify log entries are correctly added and displayed."""
     feed = ActivityFeedWidget()
-    
-    feed.add_entry({"level": "info", "event": "Pipeline starting...", "timestamp": "2026-05-27T10:00:00Z"})
-    feed.add_entry({"level": "warning", "event": "Font resolver mismatch", "timestamp": "2026-05-27T10:00:05Z"})
-    feed.add_entry({"level": "error", "event": "Mux job failed", "timestamp": "2026-05-27T10:00:10Z"})
-    feed.add_entry({"level": "debug", "event": "Debug context details", "timestamp": "2026-05-27T10:00:15Z"})
+
+    feed.add_entry(
+        {
+            "level": "info",
+            "event": "Pipeline starting...",
+            "timestamp": "2026-05-27T10:00:00Z",
+        }
+    )
+    feed.add_entry(
+        {
+            "level": "warning",
+            "event": "Font resolver mismatch",
+            "timestamp": "2026-05-27T10:00:05Z",
+        }
+    )
+    feed.add_entry(
+        {
+            "level": "error",
+            "event": "Mux job failed",
+            "timestamp": "2026-05-27T10:00:10Z",
+        }
+    )
+    feed.add_entry(
+        {
+            "level": "debug",
+            "event": "Debug context details",
+            "timestamp": "2026-05-27T10:00:15Z",
+        }
+    )
 
     content = feed.log_display.toPlainText()
     assert "[10:00:00] [INFO] Pipeline starting..." in content
@@ -40,7 +64,7 @@ def test_activity_feed_add_entries() -> None:
 def test_activity_feed_maximum_block_count_limit() -> None:
     """Verify the document limits number of stored log blocks to prevent memory leaks."""
     feed = ActivityFeedWidget()
-    
+
     # Append 1050 logs
     for i in range(1050):
         feed.add_entry({"level": "info", "event": f"Log entry {i}"})
@@ -73,7 +97,7 @@ def test_activity_feed_collapsed_state_by_default() -> None:
 def test_activity_feed_toggle_expand_and_collapse() -> None:
     """Verify that toggle_collapsed() expands to 160px and collapses back to 36px."""
     feed = ActivityFeedWidget()
-    
+
     # Expand
     feed.toggle_collapsed()
     assert feed.maximumHeight() == 160
@@ -90,4 +114,3 @@ def test_activity_feed_update_summary() -> None:
     feed = ActivityFeedWidget()
     feed.update_summary("Last event message")
     assert feed.summary_label.text() == "Last event message"
-

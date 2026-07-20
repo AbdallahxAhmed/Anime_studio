@@ -1,5 +1,5 @@
 import logging
-from PySide6.QtCore import Signal, Property, QPropertyAnimation
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -30,7 +30,7 @@ class ActivityFeedWidget(QWidget):
 
         # Top Control Row
         control_layout = QHBoxLayout()
-        
+
         # Toggle button
         self.toggle_button = QToolButton(self)
         self.toggle_button.setText("▶")
@@ -66,7 +66,9 @@ class ActivityFeedWidget(QWidget):
         self.log_display.setReadOnly(True)
         self.log_display.setUndoRedoEnabled(False)
         self.log_display.document().setMaximumBlockCount(1000)
-        self.log_display.setPlaceholderText("Pipeline activity logs will stream here...")
+        self.log_display.setPlaceholderText(
+            "Pipeline activity logs will stream here..."
+        )
         self.log_display.setVisible(False)
         layout.addWidget(self.log_display)
 

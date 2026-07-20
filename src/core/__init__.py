@@ -8,6 +8,8 @@ from src.core.library_scanner import LibraryScanner
 from src.core.mux_planner import plan_mux
 from src.core.report_writer import render_report, render_incremental_section
 from src.core.pipeline_runner import PipelineRunner
+from src.core.checkpoint_manager import CheckpointManager
+from src.core.undo_service import UndoService
 
 __all__ = [
     "CircuitBreaker",
@@ -21,4 +23,6 @@ __all__ = [
     "render_report",
     "render_incremental_section",
     "PipelineRunner",
+    "CheckpointManager",
+    "UndoService",
 ]

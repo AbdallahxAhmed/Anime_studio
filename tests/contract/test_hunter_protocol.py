@@ -63,4 +63,3 @@ def test_hunter_protocol_attributes_type():
 def test_system_font_hunter_conformance():
     hunter = SystemFontHunter()
     assert isinstance(hunter, HunterProtocol)
-

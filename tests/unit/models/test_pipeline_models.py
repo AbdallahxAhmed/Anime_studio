@@ -157,10 +157,7 @@ def test_pipeline_config_selected_paths():
 
 
 def test_library_scan_output_show_tree():
-    output = LibraryScanOutput(
-        episodes=[],
-        show_tree=()
-    )
+    output = LibraryScanOutput(episodes=[], show_tree=())
     assert output.show_tree == ()
 
 

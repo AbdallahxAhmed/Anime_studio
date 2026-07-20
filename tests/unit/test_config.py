@@ -69,7 +69,7 @@ def test_app_config_save_to_toml(tmp_path):
     config = AppConfig(
         proxy="socks5://localhost:1080",
         max_concurrent_disk_io=5,
-        library_path=Path("D:\\Anime")
+        library_path=Path("D:\\Anime"),
     )
     config.save_to_toml(toml_file)
 
@@ -78,4 +78,3 @@ def test_app_config_save_to_toml(tmp_path):
     assert reloaded.proxy == "socks5://localhost:1080"
     assert reloaded.max_concurrent_disk_io == 5
     assert reloaded.library_path == Path("D:\\Anime")
-

@@ -123,7 +123,9 @@ async def test_show_index_corrupt_toml(tmp_path: Path) -> None:
     manager = ShowIndexManager(tmp_path)
     # Write corrupted data to index path
     manager.index_path.parent.mkdir(parents=True, exist_ok=True)
-    manager.index_path.write_text("corrupted [ toml: = missing quotes", encoding="utf-8")
+    manager.index_path.write_text(
+        "corrupted [ toml: = missing quotes", encoding="utf-8"
+    )
 
     shows = await manager.load()
     assert shows == []

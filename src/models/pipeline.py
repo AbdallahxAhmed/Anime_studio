@@ -11,12 +11,12 @@ from src.models.report import EpisodeStatus
 
 
 class ShowStatus(StrEnum):
-    PENDING      = "pending"
-    PROCESSING   = "processing"
-    READY        = "ready"
-    ALL_DONE     = "all_done"
-    NO_SUBTITLE  = "no_subtitle"
-    WARNING      = "warning"
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    ALL_DONE = "all_done"
+    NO_SUBTITLE = "no_subtitle"
+    WARNING = "warning"
 
 
 @dataclass(frozen=True)
@@ -35,10 +35,10 @@ class EmbeddedTrack(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     track_id: int = Field(ge=0)
-    language: str = ""          # ISO 639-2/B e.g. "ara", "eng"
-    language_ietf: str = ""     # BCP 47 e.g. "ar", "en"
+    language: str = ""  # ISO 639-2/B e.g. "ara", "eng"
+    language_ietf: str = ""  # BCP 47 e.g. "ar", "en"
     is_default: bool = False
-    codec: str = ""             # e.g. "SubStationAlpha"
+    codec: str = ""  # e.g. "SubStationAlpha"
 
 
 class EmbeddedSubInfo(BaseModel):
@@ -87,7 +87,7 @@ class EpisodeContext(BaseModel):
 
 @dataclass(frozen=True)
 class SubFolderNode:
-    name: str           # "Season 1", "Movies", etc.
+    name: str  # "Season 1", "Movies", etc.
     path: Path
     episodes: tuple[EpisodeContext, ...]
 
@@ -98,16 +98,14 @@ class SubFolderNode:
 
 @dataclass(frozen=True)
 class ShowNode:
-    name: str           # "Hunter x Hunter"
+    name: str  # "Hunter x Hunter"
     path: Path
     sub_folders: tuple[SubFolderNode, ...]
     episodes: tuple[EpisodeContext, ...]  # direct episodes (no sub-folder)
 
     @property
     def total_count(self) -> int:
-        return len(self.episodes) + sum(
-            sf.total_count for sf in self.sub_folders
-        )
+        return len(self.episodes) + sum(sf.total_count for sf in self.sub_folders)
 
 
 class PipelineConfig(BaseModel):

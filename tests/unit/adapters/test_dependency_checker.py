@@ -317,3 +317,37 @@ def is_stdlib(module_name: str) -> bool:
         return "stdlib" in file or "lib" in file.lower() or "python" in file.lower()
     except Exception:
         return False
+
+
+def test_tool_registry_contains():
+    from src.adapters.dependency_checker import (
+        ToolRegistry,
+        ResolvedTool,
+        BinaryClassification,
+    )
+    from pathlib import Path
+
+    registry = ToolRegistry()
+    assert "mkvmerge" not in registry
+
+    tool = ResolvedTool(
+        name="mkvmerge",
+        path=Path("/usr/bin/mkvmerge"),
+        classification=BinaryClassification.CRITICAL,
+        is_available=True,
+    )
+    registry.register(tool)
+
+    assert "mkvmerge" in registry
+    assert registry.is_available("mkvmerge") is True
+
+    # Test unavailable tool
+    tool_unavail = ResolvedTool(
+        name="alass",
+        path=Path(""),
+        classification=BinaryClassification.OPTIONAL,
+        is_available=False,
+    )
+    registry.register(tool_unavail)
+    assert "alass" not in registry
+    assert registry.is_available("alass") is False

@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from enum import Enum
 
 
+from pathlib import Path
+
+
 class EpisodeStatus(Enum):
     COMPLETE = "complete"
     PARTIAL = "partial"
@@ -12,6 +15,7 @@ class EpisodeStatus(Enum):
 @dataclass
 class EpisodeResult:
     name: str
+    episode_path: Path
     status: EpisodeStatus
     fonts_found: int
     fonts_missing: int

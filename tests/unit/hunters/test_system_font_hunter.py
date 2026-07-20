@@ -98,7 +98,7 @@ async def test_system_font_hunter_search_match_and_miss():
         assert results[0].font_asset.name == "TestTTF Regular"
         assert results[0].font_asset.is_cacheable is False
         assert results[0].font_asset.source == "system"
-        assert results[0].font_asset.layer_found == 4
+        assert results[0].font_asset.layer_found == 3
         assert results[0].font_asset.file_path == Path("tests/fixtures/fonts/valid.ttf")
 
         # Query for OTF full name

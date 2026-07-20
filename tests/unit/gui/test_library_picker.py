@@ -46,9 +46,7 @@ def test_library_picker_browse_select_folder(mocker, tmp_path: Path) -> None:
 
     # Mock QFileDialog.getExistingDirectory to return our path
     mocker.patch.object(
-        QFileDialog,
-        "getExistingDirectory",
-        return_value=str(selected_path.resolve())
+        QFileDialog, "getExistingDirectory", return_value=str(selected_path.resolve())
     )
 
     # Listen to library_selected signal
@@ -66,13 +64,9 @@ def test_library_picker_browse_select_folder(mocker, tmp_path: Path) -> None:
 def test_library_picker_browse_cancel(mocker) -> None:
     """Verify canceling the browse dialog does not alter path or emit."""
     picker = LibraryPickerWidget()
-    
+
     # Mock QFileDialog.getExistingDirectory to return empty string
-    mocker.patch.object(
-        QFileDialog,
-        "getExistingDirectory",
-        return_value=""
-    )
+    mocker.patch.object(QFileDialog, "getExistingDirectory", return_value="")
 
     emitted = []
     picker.library_selected.connect(emitted.append)

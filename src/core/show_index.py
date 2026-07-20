@@ -28,9 +28,11 @@ class ShowIndexManager:
             with self.index_path.open("rb") as f:
                 data = tomllib.load(f)
             if data.get("cache_version") != self.CACHE_VERSION:
-                logger.warning(f"Unsupported cache version: {data.get('cache_version')}")
+                logger.warning(
+                    f"Unsupported cache version: {data.get('cache_version')}"
+                )
                 return []
-            
+
             shows = []
             for show_data in data.get("shows", []):
                 shows.append(
@@ -62,16 +64,18 @@ class ShowIndexManager:
             for show in shows:
                 # Convert backslashes for cross-platform compatibility
                 toml_path = str(show.path).replace("\\", "/")
-                lines.extend([
-                    "[[shows]]",
-                    f'name = "{show.name}"',
-                    f'path = "{toml_path}"',
-                    f'status = "{show.status}"',
-                    f'episode_count = {show.episode_count}',
-                    f'processed_count = {show.processed_count}',
-                    f'subtitle_text = "{show.subtitle_text}"',
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "[[shows]]",
+                        f'name = "{show.name}"',
+                        f'path = "{toml_path}"',
+                        f'status = "{show.status}"',
+                        f"episode_count = {show.episode_count}",
+                        f"processed_count = {show.processed_count}",
+                        f'subtitle_text = "{show.subtitle_text}"',
+                        "",
+                    ]
+                )
 
             temp_path = self.index_path.with_suffix(".tmp")
             temp_path.write_text("\n".join(lines), encoding="utf-8")

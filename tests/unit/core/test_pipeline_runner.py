@@ -145,9 +145,7 @@ async def test_pipeline_runner_success(
         )
     ]
     mock_scanner = _make_mock_scanner(
-        LibraryScanOutput(
-            episodes=scan_res, font_directories=[Path("/anime/Fonts")]
-        )
+        LibraryScanOutput(episodes=scan_res, font_directories=[Path("/anime/Fonts")])
     )
     runner = PipelineRunner(
         font_resolver=mock_font_resolver,
@@ -264,3 +262,171 @@ async def test_pipeline_runner_subtitle_sync_fallback(
         assert ep.subtitle_result.tool_used == "alass"
         assert ep.subtitle_result.tool_fallback_used == "ffsubsync"
         assert ep.subtitle_result.offset_ms == 150.0  # 0.15s * 1000
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_respects_selected_paths(
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    scan_res = [
+        LibraryScanResult(
+            episode_path=Path("/anime/Show A/episode_01.mkv"),
+            subtitle_path=Path("/anime/Show A/episode_01.ass"),
+            anime_title="Show A",
+        ),
+        LibraryScanResult(
+            episode_path=Path("/anime/Show B/episode_02.mkv"),
+            subtitle_path=Path("/anime/Show B/episode_02.ass"),
+            anime_title="Show B",
+        ),
+    ]
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=scan_res, font_directories=[])
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    repaired_content = "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial"
+
+    with patch(
+        "src.core.pipeline_runner.repair_ass",
+        MagicMock(return_value=repaired_content),
+    ):
+        cfg = PipelineConfig(
+            library_path=Path("/anime"),
+            selected_paths=frozenset({Path("/anime/Show A")}),
+        )
+        report = await runner.run(cfg)
+
+        # Show A is processed. Show B is not in report because /anime is a mock path and has no files on disk.
+        processed = [e for e in report.episodes if e.status != EpisodeStatus.SKIPPED]
+        assert len(processed) == 1
+        assert processed[0].episode_path == Path("/anime/Show A/episode_01.mkv")
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_stop_event_stops_processing(
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    scan_res = [
+        LibraryScanResult(
+            episode_path=Path("/anime/Show A/ep1.mkv"),
+            subtitle_path=Path("/anime/Show A/ep1.ass"),
+            anime_title="Show A",
+        ),
+        LibraryScanResult(
+            episode_path=Path("/anime/Show A/ep2.mkv"),
+            subtitle_path=Path("/anime/Show A/ep2.ass"),
+            anime_title="Show A",
+        ),
+    ]
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=scan_res, font_directories=[])
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    stop_event = asyncio.Event()
+    # Set the stop event immediately
+    stop_event.set()
+
+    repaired_content = "dummy"
+    with patch(
+        "src.core.pipeline_runner.repair_ass", MagicMock(return_value=repaired_content)
+    ):
+        cfg = PipelineConfig(library_path=Path("/anime"))
+        report = await runner.run(cfg, stop_event=stop_event)
+
+        # Should stop before analyzing any episodes
+        assert (
+            len(report.episodes) == 2
+        )  # Total episodes scanned, but they are all skipped/not complete
+        completed = [e for e in report.episodes if e.status == EpisodeStatus.COMPLETE]
+        assert len(completed) == 0
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_writes_manifest_and_clears_checkpoint(
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    scan_res = [
+        LibraryScanResult(
+            episode_path=Path("/anime/Show A/ep1.mkv"),
+            subtitle_path=Path("/anime/Show A/ep1.ass"),
+            anime_title="Show A",
+        ),
+    ]
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=scan_res, font_directories=[])
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    mock_checkpoint_manager = MagicMock()
+    mock_checkpoint_manager.load = AsyncMock(return_value=None)
+    mock_checkpoint_manager.save = AsyncMock()
+    mock_checkpoint_manager.clear = AsyncMock()
+
+    mock_undo_service = MagicMock()
+    mock_undo_service.save_manifest = AsyncMock()
+    mock_undo_service.create_manifest_id = MagicMock(return_value="id-123")
+
+    repaired_content = "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial"
+    with patch(
+        "src.core.pipeline_runner.repair_ass", MagicMock(return_value=repaired_content)
+    ):
+        cfg = PipelineConfig(library_path=Path("/anime"))
+        await runner.run(
+            cfg,
+            checkpoint_manager=mock_checkpoint_manager,
+            undo_service=mock_undo_service,
+        )
+
+        # Verify rolling save called during the loop
+        mock_checkpoint_manager.save.assert_called_once()
+        # Verify manifest written
+        mock_undo_service.save_manifest.assert_called_once()
+        # Verify checkpoint cleared at the end
+        mock_checkpoint_manager.clear.assert_called_once()

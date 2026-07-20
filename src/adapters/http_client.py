@@ -6,8 +6,13 @@ from src.errors import ConfigurationError
 from src.ports.http_client import HttpClientPort
 
 
+from typing import Any
+
+
 class RetryAsyncTransport(httpx.AsyncHTTPTransport):
-    def __init__(self, max_retries: int = 3, backoff_factor: float = 0.1, **kwargs):
+    def __init__(
+        self, max_retries: int = 3, backoff_factor: float = 0.1, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor

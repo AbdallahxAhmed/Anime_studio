@@ -44,10 +44,6 @@ class ProgressPanelWidget(QWidget):
 
     def update_state(self, state: ProgressState) -> None:
         """Slot to handle ProgressState updates and set styling/visibility."""
-        if not isinstance(state, ProgressState):
-            logger.warning(f"Invalid progress state format received: {type(state)}")
-            return
-
         logger.info(f"Progress state update received: stage={state.stage.value}")
 
         if state.stage == ProgressStage.IDLE:
@@ -110,4 +106,3 @@ class ProgressPanelWidget(QWidget):
             "QProgressBar { border: 1px solid #F44336; border-radius: 4px; text-align: center; }"
             "QProgressBar::chunk { background-color: #F44336; }"
         )
-

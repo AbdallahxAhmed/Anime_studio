@@ -1,3 +1,4 @@
+from typing import Any
 import structlog
 import tomllib
 from datetime import datetime
@@ -15,9 +16,9 @@ class FontCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.cache_dir / "font_library.toml"
-        self.index = self._load_index()
+        self.index: dict[str, Any] = self._load_index()
 
-    def _load_index(self) -> dict:
+    def _load_index(self) -> dict[str, Any]:
         """Load and validate the cache TOML index. Rebuilds on error or version mismatch."""
         if not self.index_path.is_file():
             logger.info(
@@ -47,7 +48,7 @@ class FontCache:
             )
             return self._rebuild_from_scan()
 
-    def _save_index(self, index: dict) -> None:
+    def _save_index(self, index: dict[str, Any]) -> None:
         """Atomically save index to font_library.toml using manual TOML serialization."""
         logger.debug("Saving TOML index", path=str(self.index_path))
         lines = []
@@ -81,10 +82,10 @@ class FontCache:
                 temp_file.unlink()
             raise
 
-    def _rebuild_from_scan(self) -> dict:
+    def _rebuild_from_scan(self) -> dict[str, Any]:
         """Rebuild the index by scanning files inside cache_dir."""
         logger.info("Scanning cache directory for font files", dir=str(self.cache_dir))
-        index = {
+        index: dict[str, Any] = {
             "cache_version": CACHE_VERSION,
             "fonts": {},
         }

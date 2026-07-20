@@ -1,3 +1,4 @@
+from typing import Any, cast
 import json
 from pathlib import Path
 import structlog
@@ -53,7 +54,7 @@ class MkvmergeAdapter:
             warnings=warnings,
         )
 
-    async def identify(self, file_path: Path, timeout: float = 30.0) -> dict:
+    async def identify(self, file_path: Path, timeout: float = 30.0) -> dict[str, Any]:
         """Run mkvmerge -J on a file and return the parsed identification dict."""
         args = ["mkvmerge", "-J", str(file_path)]
         tool_result = await self.subprocess_port.execute(args, timeout=timeout)
@@ -64,6 +65,6 @@ class MkvmergeAdapter:
             )
 
         try:
-            return json.loads(tool_result.stdout)
+            return cast(dict[str, Any], json.loads(tool_result.stdout))
         except Exception as e:
             raise ToolExecutionError(f"Failed to parse mkvmerge -J JSON output: {e}")

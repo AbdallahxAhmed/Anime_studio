@@ -5,16 +5,22 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "httpx>=0.28.1",
+    "httpx[socks]>=0.28.1",
     "pydantic>=2.11.0",
-    "pytest>=9.0.3",
-    "pytest-mock>=3.15.1",
-    "pytest-asyncio>=0.23.0",
     "structlog>=25.5.0",
     "PySide6>=6.6,<6.8",
     "qasync",
     "pyqtdarktheme",
     "fonttools>=4.63.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-mock>=3.15.1",
+    "pytest-asyncio>=0.23.0",
+    "mypy>=1.10.0",
+    "ruff>=0.4.0",
 ]
 
 [tool.pytest.ini_options]
@@ -23,3 +29,30 @@ pythonpath = [
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: marks tests as integration tests"
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+warn_unused_configs = true
+show_error_codes = true
+explicit_package_bases = true
+mypy_path = "."
+
+plugins = ["pydantic.mypy"]
+
+# Per-module overrides for untyped third-party libraries
+[[tool.mypy.overrides]]
+module = [
+    "qasync.*",
+    "qdarktheme.*",
+    "ffsubsync.*",
+    "alass.*",
+]
+ignore_missing_imports = true
+
+[tool.ruff]
+exclude = ["Anime_Studio.py", ".agents"]

@@ -49,6 +49,9 @@ class ToolRegistry:
         tool = self.get(name)
         return tool is not None and tool.is_available
 
+    def __contains__(self, name: str) -> bool:
+        return self.is_available(name)
+
     def all_tools(self) -> List[ResolvedTool]:
         return list(self._tools.values())
 

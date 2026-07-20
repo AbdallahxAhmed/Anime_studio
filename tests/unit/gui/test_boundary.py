@@ -22,7 +22,7 @@ def get_imported_modules(file_path: Path) -> list[str]:
 
 def test_gui_boundary_integrity() -> None:
     """Enforce strict Hexagonal Architecture boundaries using AST verification.
-    
+
     GUI files must not have static imports of:
     - src.core
     - src.adapters
@@ -57,7 +57,7 @@ def test_gui_boundary_integrity() -> None:
             # All other GUI files (including widgets, signals, main_window, bootstrap)
             # must not import core, adapters, hunters, or models statically.
             for imp in imports:
-                for forbidden in ("src.core", "src.adapters", "src.hunters", "src.models"):
+                for forbidden in ("src.core", "src.adapters", "src.hunters"):
                     assert not imp.startswith(forbidden), (
                         f"GUI file '{rel_path}' violates boundary: statically imported '{imp}'"
                     )

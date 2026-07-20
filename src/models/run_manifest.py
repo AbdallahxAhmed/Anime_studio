@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
 
+
 @dataclass(frozen=True)
 class EpisodeProcessed:
     episode_path: str | Path
@@ -14,7 +15,9 @@ class EpisodeProcessed:
         if isinstance(self.episode_path, Path):
             object.__setattr__(self, "episode_path", self.episode_path.as_posix())
         if isinstance(self.trash_receipt_path, Path):
-            object.__setattr__(self, "trash_receipt_path", self.trash_receipt_path.as_posix())
+            object.__setattr__(
+                self, "trash_receipt_path", self.trash_receipt_path.as_posix()
+            )
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,9 @@ class RunManifest:
         if isinstance(self.library_path, Path):
             object.__setattr__(self, "library_path", self.library_path.as_posix())
         if not isinstance(self.episodes_processed, tuple):
-            object.__setattr__(self, "episodes_processed", tuple(self.episodes_processed))
+            object.__setattr__(
+                self, "episodes_processed", tuple(self.episodes_processed)
+            )
 
     @property
     def success_count(self) -> int:

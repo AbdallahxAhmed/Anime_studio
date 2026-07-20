@@ -1,6 +1,13 @@
 from pathlib import Path
 from typing import Any
-from PySide6.QtCore import Qt, Signal, QModelIndex, QAbstractTableModel, QSize
+from PySide6.QtCore import (
+    Qt,
+    Signal,
+    QModelIndex,
+    QPersistentModelIndex,
+    QAbstractTableModel,
+    QSize,
+)
 from PySide6.QtGui import QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget,
@@ -57,13 +64,21 @@ class EpisodeTableModel(QAbstractTableModel):
             [Qt.ItemDataRole.CheckStateRole],
         )
 
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+    def rowCount(
+        self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()
+    ) -> int:
         return len(self._episodes)
 
-    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+    def columnCount(
+        self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()
+    ) -> int:
         return 4
 
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+    def data(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ) -> Any:
         if not index.isValid() or not (0 <= index.row() < len(self._episodes)):
             return None
 
@@ -73,7 +88,11 @@ class EpisodeTableModel(QAbstractTableModel):
 
         if col == 0:
             if role == Qt.ItemDataRole.CheckStateRole:
-                return Qt.CheckState.Checked if self._selected[row] else Qt.CheckState.Unchecked
+                return (
+                    Qt.CheckState.Checked
+                    if self._selected[row]
+                    else Qt.CheckState.Unchecked
+                )
             return None
 
         elif col == 1:
@@ -99,27 +118,47 @@ class EpisodeTableModel(QAbstractTableModel):
 
         return None
 
-    def setData(self, index: QModelIndex, value: Any, role: int) -> bool:
-        if not index.isValid() or index.column() != 0 or not (0 <= index.row() < len(self._episodes)):
+    def setData(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        value: Any,
+        role: int = Qt.ItemDataRole.EditRole,
+    ) -> bool:
+        if (
+            not index.isValid()
+            or index.column() != 0
+            or not (0 <= index.row() < len(self._episodes))
+        ):
             return False
 
         if role == Qt.ItemDataRole.CheckStateRole:
-            self._selected[index.row()] = (value == Qt.CheckState.Checked.value or value == Qt.CheckState.Checked)
+            self._selected[index.row()] = (
+                value == Qt.CheckState.Checked.value or value == Qt.CheckState.Checked
+            )
             self.dataChanged.emit(index, index, [role])
             return True
         return False
 
-    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+    def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-
-        base_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        base_flags: Qt.ItemFlag = (
+            Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        )
         if index.column() == 0:
             return base_flags | Qt.ItemFlag.ItemIsUserCheckable
         return base_flags
 
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int) -> Any:
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ) -> Any:
+        if (
+            orientation == Qt.Orientation.Horizontal
+            and role == Qt.ItemDataRole.DisplayRole
+        ):
             return self.COLUMNS[section]
         return None
 
@@ -143,7 +182,12 @@ class StatusBadgeDelegate(QStyledItemDelegate):
         "error": QColor("#E8572A"),
     }
 
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> None:
         if index.column() != 3:
             super().paint(painter, option, index)
             return
@@ -155,10 +199,10 @@ class StatusBadgeDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Draw default background (selection highlight)
-        if option.state & QStyle.State_Selected:
-            painter.fillRect(option.rect, option.palette.highlight())
+        if option.state & QStyle.StateFlag.State_Selected:  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits state from QStyleOption
+            painter.fillRect(option.rect, option.palette.highlight())  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits rect/palette from QStyleOption
 
-        rect = option.rect.adjusted(6, 6, -6, -6)
+        rect = option.rect.adjusted(6, 6, -6, -6)  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits rect from QStyleOption
         painter.setBrush(bg_color)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(rect, 4, 4)
@@ -171,7 +215,9 @@ class StatusBadgeDelegate(QStyledItemDelegate):
 
         painter.restore()
 
-    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+    def sizeHint(
+        self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
+    ) -> QSize:
         return QSize(100, 36)
 
 

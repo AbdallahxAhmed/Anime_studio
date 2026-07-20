@@ -1,10 +1,10 @@
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from pathlib import Path
 
 
 @runtime_checkable
 class MkvmergePort(Protocol):
-    async def identify(self, file_path: Path, timeout: float = 30.0) -> dict:
+    async def identify(self, file_path: Path, timeout: float = 30.0) -> dict[str, Any]:
         """Run mkvmerge -J on a file and return the parsed identification dict.
 
         Args:

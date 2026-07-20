@@ -16,7 +16,7 @@ class FilesystemAdapter(FilesystemPort):
     ) -> None:
         """Move source file to trash directory per receipt. Create trash dir if needed."""
 
-        def _move():
+        def _move() -> None:
             src_path = Path(source)
             dest_path = Path(trash_receipt.trash_path)
 
@@ -38,7 +38,7 @@ class FilesystemAdapter(FilesystemPort):
     ) -> None:
         """Write content to target via temp file + atomic rename."""
 
-        def _write():
+        def _write() -> None:
             target_path = Path(target)
             target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +64,7 @@ class FilesystemAdapter(FilesystemPort):
     async def ensure_directory(self, path: Path) -> None:
         """Create directory and parents if needed."""
 
-        def _mkdir():
+        def _mkdir() -> None:
             Path(path).mkdir(parents=True, exist_ok=True)
             logger.debug("ensured directory exists", path=path)
 
@@ -73,7 +73,7 @@ class FilesystemAdapter(FilesystemPort):
     async def replace_file(self, source: Path, target: Path) -> None:
         """Atomically replace target with source."""
 
-        def _replace():
+        def _replace() -> None:
             src_path = Path(source)
             dest_path = Path(target)
             if dest_path.exists():

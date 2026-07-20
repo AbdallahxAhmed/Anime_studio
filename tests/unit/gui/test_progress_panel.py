@@ -33,8 +33,10 @@ def test_progress_panel_idle_state() -> None:
 def test_progress_panel_scanning_state() -> None:
     """Verify that update_state with ProgressStage.SCANNING sets indeterminate mode."""
     panel = ProgressPanelWidget()
-    state = ProgressState(stage=ProgressStage.SCANNING, status_text="Locating anime files...")
-    
+    state = ProgressState(
+        stage=ProgressStage.SCANNING, status_text="Locating anime files..."
+    )
+
     panel.update_state(state)
     assert panel.isVisible() is True
     assert panel.status_label.text() == "Locating anime files..."
@@ -70,7 +72,9 @@ def test_progress_panel_complete_state() -> None:
 def test_progress_panel_error_state() -> None:
     """Verify that update_state with ProgressStage.ERROR applies failure styling."""
     panel = ProgressPanelWidget()
-    state = ProgressState(stage=ProgressStage.ERROR, status_text="Something went wrong!")
+    state = ProgressState(
+        stage=ProgressStage.ERROR, status_text="Something went wrong!"
+    )
 
     panel.update_state(state)
     assert panel.isVisible() is True

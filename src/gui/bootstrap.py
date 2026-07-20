@@ -47,6 +47,7 @@ def map_pipeline_report(report: Any, library_path: Path, dry_run: bool) -> Any:
         episode_results.append(
             EpisodeResult(
                 name=ep.episode_path.name,
+                episode_path=ep.episode_path,
                 status=status,
                 fonts_found=fonts_found,
                 fonts_missing=fonts_missing,
@@ -113,6 +114,61 @@ def bootstrap_app(app: QApplication) -> Any:
     HunterRegistry = registry_mod.HunterRegistry
     hunter_registry = HunterRegistry(cooldown_s=config.circuit_breaker_cooldown_s)
 
+    # Dynamically load and register all hunters in priority order
+    # Layer 1: MkvExtractHunter
+    mkv_extract_mod = importlib.import_module("src.hunters.sources.mkv_extract")
+    MkvExtractHunter = mkv_extract_mod.MkvExtractHunter
+    hunter_registry.register(
+        MkvExtractHunter(
+            subprocess_port=subprocess_adapter, library_path=config.library_path
+        )
+    )
+
+    # Layer 2: SiblingFontHunter
+    sibling_font_mod = importlib.import_module("src.hunters.sources.sibling_font")
+    SiblingFontHunter = sibling_font_mod.SiblingFontHunter
+    hunter_registry.register(SiblingFontHunter())
+
+    # Layer 3: SystemFontHunter
+    system_font_mod = importlib.import_module("src.hunters.system_font_hunter")
+    SystemFontHunter = system_font_mod.SystemFontHunter
+    hunter_registry.register(SystemFontHunter())
+
+    # Layer 4A: GoogleFontsHunter
+    google_fonts_mod = importlib.import_module("src.hunters.sources.google_fonts")
+    GoogleFontsHunter = google_fonts_mod.GoogleFontsHunter
+    hunter_registry.register(GoogleFontsHunter(proxy=config.proxy))
+
+    # Layer 4B: FontSquirrelHunter
+    fontsquirrel_mod = importlib.import_module("src.hunters.sources.fontsquirrel")
+    FontSquirrelHunter = fontsquirrel_mod.FontSquirrelHunter
+    hunter_registry.register(FontSquirrelHunter(proxy=config.proxy))
+
+    # Layer 4C: DaFontHunter
+    dafont_mod = importlib.import_module("src.hunters.sources.dafont")
+    DaFontHunter = dafont_mod.DaFontHunter
+    hunter_registry.register(DaFontHunter(proxy=config.proxy))
+
+    # Layer 4D: FontSpaceHunter
+    fontspace_mod = importlib.import_module("src.hunters.sources.fontspace")
+    FontSpaceHunter = fontspace_mod.FontSpaceHunter
+    hunter_registry.register(FontSpaceHunter(proxy=config.proxy))
+
+    # Layer 4E: BeFontsHunter
+    befonts_mod = importlib.import_module("src.hunters.sources.befonts")
+    BeFontsHunter = befonts_mod.BeFontsHunter
+    hunter_registry.register(BeFontsHunter(proxy=config.proxy))
+
+    # Layer 4F: ArabicFontsHunter
+    arabic_fonts_mod = importlib.import_module("src.hunters.sources.arabic_fonts")
+    ArabicFontsHunter = arabic_fonts_mod.ArabicFontsHunter
+    hunter_registry.register(ArabicFontsHunter(proxy=config.proxy))
+
+    # Layer 5: SearchEngineHunter
+    search_engine_mod = importlib.import_module("src.hunters.sources.search_engine")
+    SearchEngineHunter = search_engine_mod.SearchEngineHunter
+    hunter_registry.register(SearchEngineHunter(proxy=config.proxy))
+
     core_resolver = importlib.import_module("src.core.font_resolver")
     FontResolver = core_resolver.FontResolver
     font_resolver = FontResolver(
@@ -172,6 +228,36 @@ def bootstrap_app(app: QApplication) -> Any:
     structlog.configure(processors=processors)
 
     # 5. Create MainWindow
+    core_checkpoint = importlib.import_module("src.core.checkpoint_manager")
+    CheckpointManager = core_checkpoint.CheckpointManager
+
+    import os
+
+    if sys.platform == "win32":
+        app_data = os.environ.get("APPDATA")
+        if app_data:
+            data_dir = Path(app_data) / "AnimeStudio"
+        else:
+            data_dir = Path.home() / "AppData" / "Roaming" / "AnimeStudio"
+    else:
+        data_dir = Path.home() / ".config" / "AnimeStudio"
+
+    checkpoint_manager = CheckpointManager(data_dir)
+
+    core_undo = importlib.import_module("src.core.undo_service")
+    UndoService = core_undo.UndoService
+    undo_service = UndoService(
+        data_dir=data_dir,
+        filesystem_port=filesystem_adapter,
+        max_run_history=config.max_run_history,
+    )
+
+    core_show_index = importlib.import_module("src.core.show_index")
+    ShowIndexManager = core_show_index.ShowIndexManager
+    show_index_manager = ShowIndexManager(
+        config.library_path if config.library_path else data_dir
+    )
+
     main_window_mod = importlib.import_module("src.gui.main_window")
     MainWindow = main_window_mod.MainWindow
     window = MainWindow(
@@ -179,11 +265,13 @@ def bootstrap_app(app: QApplication) -> Any:
         log_bridge=log_bridge,
         config=config,
         font_ingestion_service=font_ingestion_service,
+        show_index_manager=show_index_manager,
+        checkpoint_manager=checkpoint_manager,
+        undo_service=undo_service,
     )
 
-    # 6. Pre-populate library path if previously configured
-    if config.library_path:
-        window.library_picker.set_path(config.library_path)
-        window.run_button.setEnabled(True)
+    import asyncio
+
+    asyncio.ensure_future(window._on_startup())
 
     return window

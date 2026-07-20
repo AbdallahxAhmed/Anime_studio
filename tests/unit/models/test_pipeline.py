@@ -54,7 +54,7 @@ def test_show_summary_creation_and_immutability() -> None:
 def test_show_summary_subtitle_text_accepts_any_string() -> None:
     """Test that ShowSummary subtitle_text field accepts any string format."""
     path = Path("D:/Entertainment/Anime/Wistoria").absolute()
-    
+
     test_strings = [
         "",
         "Any random string text",
@@ -62,7 +62,7 @@ def test_show_summary_subtitle_text_accepts_any_string() -> None:
         "No subtitle files found!",
         "Special characters: !@#$%^&*()_+",
     ]
-    
+
     for subtitle_str in test_strings:
         summary = ShowSummary(
             name="Wistoria",

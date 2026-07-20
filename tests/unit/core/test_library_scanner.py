@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from src.core.library_scanner import LibraryScanner, _parse_embedded_info
-from src.models.pipeline import LibraryScanOutput, EmbeddedSubInfo
+from src.models.pipeline import LibraryScanOutput
 from src.models.subtitle import SubtitleSource
 
 
@@ -122,6 +122,18 @@ def test_is_excluded():
     assert _is_excluded(base / ".git" / "config", base) is True
     assert _is_excluded(base / "show" / "episode_01.mkv", base) is False
     assert _is_excluded(base / "show" / "Fonts" / "font.ttf", base) is False
+
+
+def test_is_excluded_amux_temp_file():
+    from src.core.library_scanner import _is_excluded
+
+    base = Path("/test/library")
+    assert _is_excluded(base / "_amux_ep01.tmp.mkv", base) is True
+    assert _is_excluded(base / "_amux_ep01.tmp.ass", base) is True
+    assert _is_excluded(base / "_amux_abc123.tmp.mkv", base) is True
+    assert _is_excluded(base / "amux_regular.mkv", base) is False
+    assert _is_excluded(base / "episode.tmp.mkv", base) is False
+    assert _is_excluded(base / "episode01.mkv", base) is False
 
 
 @pytest.mark.anyio
@@ -421,6 +433,66 @@ async def test_scan_with_no_embedded_ass(tmp_path):
 
     scanner = LibraryScanner(mkvmerge=mock_mkvmerge)
     results = await scanner.scan(tmp_path)
-
     # SRT tracks should not be detected as ASS
     assert len(results.episodes) == 0
+
+
+@pytest.mark.anyio
+async def test_scan_library_builds_show_tree(tmp_path):
+    # Setup directory layout:
+    # tmp_path/
+    #   Show A/
+    #     episode_01.mkv
+    #     episode_01.ass
+    #     Season 1/
+    #       episode_02.mkv
+    #       episode_02.ass
+    #   Show B/
+    #     episode_03.mkv
+    #     episode_03.ass
+
+    show_a = tmp_path / "Show A"
+    show_a.mkdir()
+    (show_a / "episode_01.mkv").touch()
+    (show_a / "episode_01.ass").touch()
+
+    season_1 = show_a / "Season 1"
+    season_1.mkdir()
+    (season_1 / "episode_02.mkv").touch()
+    (season_1 / "episode_02.ass").touch()
+
+    show_b = tmp_path / "Show B"
+    show_b.mkdir()
+    (show_b / "episode_03.mkv").touch()
+    (show_b / "episode_03.ass").touch()
+
+    scanner = LibraryScanner()
+    results = await scanner.scan(tmp_path)
+
+    # Check show_tree structure
+    tree = results.show_tree
+    assert len(tree) == 2
+
+    # Sorted by name
+    assert tree[0].name == "Show A"
+    assert tree[0].path == show_a.resolve()
+    assert len(tree[0].episodes) == 1
+    assert (
+        tree[0].episodes[0].scan_result.episode_path
+        == (show_a / "episode_01.mkv").resolve()
+    )
+    assert len(tree[0].sub_folders) == 1
+    assert tree[0].sub_folders[0].name == "Season 1"
+    assert tree[0].sub_folders[0].path == season_1.resolve()
+    assert len(tree[0].sub_folders[0].episodes) == 1
+    assert (
+        tree[0].sub_folders[0].episodes[0].scan_result.episode_path
+        == (season_1 / "episode_02.mkv").resolve()
+    )
+    assert tree[0].total_count == 2
+
+    assert tree[1].name == "Show B"
+    assert tree[1].path == show_b.resolve()
+    assert len(tree[1].episodes) == 1
+    assert len(tree[1].sub_folders) == 0
+    assert tree[1].total_count == 1

@@ -186,7 +186,11 @@ class LibraryScanner:
         show_nodes = []
         try:
             top_dirs = sorted(
-                [d for d in lib_path.iterdir() if d.is_dir() and not _is_excluded(d, lib_path)],
+                [
+                    d
+                    for d in lib_path.iterdir()
+                    if d.is_dir() and not _is_excluded(d, lib_path)
+                ],
                 key=lambda d: d.name,
             )
         except Exception:
@@ -197,7 +201,11 @@ class LibraryScanner:
             sub_folders = []
             try:
                 sub_dirs = sorted(
-                    [d for d in show_dir.iterdir() if d.is_dir() and not _is_excluded(d, lib_path)],
+                    [
+                        d
+                        for d in show_dir.iterdir()
+                        if d.is_dir() and not _is_excluded(d, lib_path)
+                    ],
                     key=lambda d: d.name,
                 )
             except Exception:
@@ -206,8 +214,10 @@ class LibraryScanner:
             for sub_dir in sub_dirs:
                 resolved_sub = sub_dir.resolve()
                 sub_episodes = tuple(
-                    ep_ctx for ep_path, ep_ctx in episodes_by_path.items()
-                    if ep_path.parent == resolved_sub or _is_ancestor(resolved_sub, ep_path)
+                    ep_ctx
+                    for ep_path, ep_ctx in episodes_by_path.items()
+                    if ep_path.parent == resolved_sub
+                    or _is_ancestor(resolved_sub, ep_path)
                 )
                 if sub_episodes:
                     sub_folders.append(
@@ -219,7 +229,8 @@ class LibraryScanner:
                     )
 
             direct_episodes = tuple(
-                ep_ctx for ep_path, ep_ctx in episodes_by_path.items()
+                ep_ctx
+                for ep_path, ep_ctx in episodes_by_path.items()
                 if ep_path.parent == resolved_show
             )
 
@@ -279,7 +290,9 @@ class LibraryScanner:
 
         all_results = phase1_results + phase2_results
         sorted_results = sorted(all_results, key=lambda r: r.episode_path.name)
-        show_tree = await asyncio.to_thread(self._build_show_tree, lib_path, sorted_results)
+        show_tree = await asyncio.to_thread(
+            self._build_show_tree, lib_path, sorted_results
+        )
         return LibraryScanOutput(
             episodes=sorted_results,
             font_directories=sorted(list(font_dirs)),

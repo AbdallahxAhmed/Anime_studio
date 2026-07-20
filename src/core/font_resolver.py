@@ -93,12 +93,15 @@ class FontResolver:
                 cb.record_failure()
 
         # All layers exhausted
-        error_msg = f"Font '{query.requested_name}' resolution failed after checking all layers. Audit trail: {'; '.join(audit_trail)}"
+        error_msg = f"Font '{query.requested_name}' not found on any known source. Mux will proceed without this font."
         logger.error(
-            "Font resolution chain fully exhausted", font_name=query.requested_name
+            "font_not_found_anywhere",
+            font_name=query.requested_name,
+            layers_tried=audit_trail,
+            detail="Font could not be located on any known source. Mux will proceed without this font attachment.",
         )
         err = FontMatchError(error_msg)
-        err.audit_trail = audit_trail  # type: ignore
+        err.audit_trail = audit_trail  # type: ignore[attr-defined]  # dynamic property on custom exception subclass
         raise err
 
     async def _ping_hunter(
@@ -133,10 +136,9 @@ class FontResolver:
     async def startup_ping(self) -> None:
         """Concurrent health ping for all network hunters using TaskGroup."""
         logger.info("Initializing concurrent startup pings for network hunters")
-        client_kwargs = {}
-        if self.config.proxy:
-            client_kwargs["proxy"] = self.config.proxy
-        async with httpx.AsyncClient(**client_kwargs) as client:
+        proxy = self.config.proxy if self.config.proxy else None
+        client = httpx.AsyncClient(proxy=proxy) if proxy else httpx.AsyncClient()
+        async with client as client:
             try:
                 async with asyncio.TaskGroup() as tg:
                     # Registry iter_hunters sorts them, but we want to ping all hunters in _hunters

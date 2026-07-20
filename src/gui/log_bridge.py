@@ -13,6 +13,8 @@ class GuiLogBridge(QObject):
 
     def __init__(self) -> None:
         super().__init__()
+        self._session_buffer: list[dict[str, Any]] = []
+        self._buffer_cap: int = 10000
 
     def __call__(
         self,
@@ -32,4 +34,13 @@ class GuiLogBridge(QObject):
             # Emit the Qt Signal. Qt guarantees thread safety and event loop delivery.
             self.log_received.emit(event_copy)
 
+            if len(self._session_buffer) < self._buffer_cap:
+                self._session_buffer.append(event_copy)
+
         return event_dict  # pass through to remaining processors
+
+    def get_session_log(self) -> list[dict[str, Any]]:
+        return list(self._session_buffer)
+
+    def get_session_entries(self) -> list[dict[str, Any]]:
+        return list(self._session_buffer)

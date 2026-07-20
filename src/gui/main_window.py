@@ -1,25 +1,36 @@
+from __future__ import annotations
+import asyncio
 import importlib
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from pathlib import Path
 from qasync import asyncSlot
+
+if TYPE_CHECKING:
+    from src.models.run_manifest import RunManifest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QSplitter,
     QMessageBox,
     QPushButton,
+    QLabel,
+    QFileDialog,
 )
 
+from src.errors import AnimeStudioError
 from src.gui.signals import SignalBridge
 from src.gui.widgets import (
-    LibraryPickerWidget,
     ActivityFeedWidget,
     ProgressPanelWidget,
     ResultsTableWidget,
+    ShowSidebarWidget,
+    EpisodeTableWidget,
 )
+from src.models.pipeline import ShowSummary, ShowStatus
 
 logger = logging.getLogger("anime_studio.gui.main_window")
 
@@ -27,8 +38,8 @@ logger = logging.getLogger("anime_studio.gui.main_window")
 class MainWindow(QMainWindow):
     """The primary QMainWindow for the Anime Studio dashboard.
 
-    Houses the configuration/picker panel, the real-time activity feed,
-    the progress panel, and the pipeline results table.
+    Houses the horizontal two-panel layout featuring the ShowSidebarWidget
+    on the left and the main control panel with EpisodeTableWidget on the right.
     """
 
     def __init__(
@@ -37,13 +48,24 @@ class MainWindow(QMainWindow):
         log_bridge: Any,
         config: Any,
         font_ingestion_service: Any,
+        show_index_manager: Any,
+        checkpoint_manager: Any = None,
+        undo_service: Any = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.pipeline_runner = pipeline_runner
+        self._log_bridge = log_bridge
         self.config = config
         self.font_ingestion_service = font_ingestion_service
+        self._show_index = show_index_manager
+        self._checkpoint_manager = checkpoint_manager
+        self._undo_service = undo_service
         self._pipeline_running = False
+        self._is_refreshing = False
+        self._awaiting_selection = False
+        self._pending_scan_output = None
+        self._stop_event: asyncio.Event | None = None
 
         # Initialize SignalBridge
         self.signal_bridge = SignalBridge()
@@ -56,56 +78,105 @@ class MainWindow(QMainWindow):
         # Central Widget & Main Layout
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Main splitter (horizontal) to separate inputs/logs from status/results
+        # Root layout (vertical)
+        root_layout = QVBoxLayout(central_widget)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(10)
+
+        # Header Bar (44px fixed height)
+        self._header_bar = QWidget(central_widget)
+        self._header_bar.setFixedHeight(44)
+        header_layout = QHBoxLayout(self._header_bar)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
+        app_title = QLabel("Anime Studio", self._header_bar)
+        app_title.setStyleSheet("font-weight: bold; font-size: 16px;")
+        header_layout.addWidget(app_title)
+
+        # Read-only library path label
+        lib_path_str = (
+            str(self.config.library_path)
+            if self.config.library_path
+            else "No Library Path Configured"
+        )
+        self.library_path_label = QLabel(lib_path_str, self._header_bar)
+        self.library_path_label.setStyleSheet(
+            "color: #888888; font-style: italic; font-size: 13px;"
+        )
+        header_layout.addWidget(self.library_path_label)
+        header_layout.addStretch()
+
+        # Settings button
+        self.settings_btn = QPushButton("⚙ Settings", self._header_bar)
+        header_layout.addWidget(self.settings_btn)
+
+        root_layout.addWidget(self._header_bar)
+
+        # Main splitter (horizontal)
         splitter = QSplitter(Qt.Orientation.Horizontal, central_widget)
-        main_layout.addWidget(splitter)
+        root_layout.addWidget(splitter)
 
-        # Left panel: Library Picker + Activity Feed
-        left_widget = QWidget(splitter)
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
+        # Left panel: ShowSidebarWidget
+        self._sidebar = ShowSidebarWidget(self.signal_bridge, splitter)
+        splitter.addWidget(self._sidebar)
 
-        # Config Panel (Library Picker + Run Button)
-        config_group = QWidget(left_widget)
-        config_layout = QVBoxLayout(config_group)
-        config_layout.setContentsMargins(0, 0, 0, 0)
-        config_layout.setSpacing(5)
+        # Right panel: MainPanel (vertical)
+        main_panel = QWidget(splitter)
+        main_panel_layout = QVBoxLayout(main_panel)
+        main_panel_layout.setContentsMargins(0, 0, 0, 0)
+        main_panel_layout.setSpacing(10)
 
-        self.library_picker = LibraryPickerWidget(config_group)
-        config_layout.addWidget(self.library_picker)
+        # Show Header Bar (56px)
+        self._show_header = QWidget(main_panel)
+        self._show_header.setFixedHeight(56)
+        show_header_layout = QHBoxLayout(self._show_header)
+        show_header_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.import_button = QPushButton("Import Fonts", config_group)
-        config_layout.addWidget(self.import_button)
+        self._show_name_label = QLabel("Select a show to start", self._show_header)
+        self._show_name_label.setStyleSheet("font-weight: bold; font-size: 18px;")
+        show_header_layout.addWidget(self._show_name_label)
 
-        self.run_button = QPushButton("Run Pipeline", config_group)
+        self._show_subtitle_label = QLabel("", self._show_header)
+        self._show_subtitle_label.setStyleSheet("color: #888888; font-size: 13px;")
+        show_header_layout.addWidget(self._show_subtitle_label)
+
+        show_header_layout.addStretch()
+
+        self.undo_button = QPushButton("Undo", self._show_header)
+        show_header_layout.addWidget(self.undo_button)
+
+        self.stop_button = QPushButton("Stop", self._show_header)
+        self.stop_button.setVisible(False)
+        show_header_layout.addWidget(self.stop_button)
+
+        self.run_button = QPushButton("Run 0 selected", self._show_header)
         self.run_button.setEnabled(False)
-        config_layout.addWidget(self.run_button)
+        show_header_layout.addWidget(self.run_button)
 
-        left_layout.addWidget(config_group)
+        main_panel_layout.addWidget(self._show_header)
 
-        self.activity_feed = ActivityFeedWidget(left_widget)
-        left_layout.addWidget(self.activity_feed)
-        splitter.addWidget(left_widget)
+        # Episode Table Widget
+        self._episode_table = EpisodeTableWidget(main_panel)
+        main_panel_layout.addWidget(self._episode_table)
 
-        # Right panel: Progress Panel + Results Table
-        right_widget = QWidget(splitter)
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(10)
+        # Progress Panel Widget
+        self.progress_panel = ProgressPanelWidget(main_panel)
+        main_panel_layout.addWidget(self.progress_panel)
 
-        self.progress_panel = ProgressPanelWidget(right_widget)
-        self.results_table = ResultsTableWidget(right_widget)
+        # Activity Feed Widget (collapsible)
+        self.activity_feed = ActivityFeedWidget(main_panel)
+        main_panel_layout.addWidget(self.activity_feed)
 
-        right_layout.addWidget(self.progress_panel)
-        right_layout.addWidget(self.results_table)
-        splitter.addWidget(right_widget)
+        # Results table
+        self.results_table = ResultsTableWidget(main_panel)
+        self.results_table.setVisible(False)
+        main_panel_layout.addWidget(self.results_table)
 
-        # Set initial splitter sizes (roughly 45% left, 55% right)
-        splitter.setSizes([450, 550])
+        splitter.addWidget(main_panel)
+
+        # Set initial splitter sizes (220px fixed for sidebar, rest for main panel)
+        splitter.setSizes([220, 880])
 
         # Wire thread-safe log bridge signals directly to slots
         log_bridge.log_received.connect(self.signal_bridge.log_received)
@@ -117,14 +188,22 @@ class MainWindow(QMainWindow):
         self.signal_bridge.pipeline_finished.connect(self.results_table.populate)
         self.signal_bridge.result_added.connect(self.results_table.add_episode_result)
 
-        # Wire library picker selection event to path handler
-        self.library_picker.library_selected.connect(self._on_library_selected)
+        # Wire new sidebar widgets signals
+        self._sidebar.show_selected.connect(self._on_show_selected)
+        self._sidebar.add_folder_requested.connect(self._on_add_folder)
+        self._sidebar.refresh_requested.connect(self._on_refresh_index)
 
-        # Wire import button click
-        self.import_button.clicked.connect(self._on_import_fonts_click)
+        # Wire Episode Table selection changes
+        self._episode_table.selection_changed.connect(self._on_selection_changed)
 
-        # Wire run button click
+        # Wire settings button to import click
+        self.settings_btn.clicked.connect(self._on_import_fonts_click)
+
+        # Wire actions
         self.run_button.clicked.connect(self._on_run_click)
+        self.stop_button.clicked.connect(self._on_stop_click)
+        self.undo_button.clicked.connect(self._on_undo_click)
+        self.activity_feed.export_requested.connect(self._on_export_log)
 
         # Setup Drag & Drop
         self.setAcceptDrops(True)
@@ -132,22 +211,157 @@ class MainWindow(QMainWindow):
 
         logger.info("MainWindow initialized and signal bridge wired")
 
-    def _on_library_selected(self, path: str) -> None:
-        """Handle library folder selection by updating configuration and UI state."""
-        p = Path(path)
-        if p.is_dir():
-            self.config.library_path = p
-            self.config.save_to_toml()
-            self.run_button.setEnabled(True)
-            logger.info(f"Library path configured and saved: {path}")
-        else:
-            self.run_button.setEnabled(False)
-            logger.warning(f"Inaccessible library path selected: {path}")
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
+    async def _on_startup(self) -> None:
+        """Loads index on startup and populates sidebar."""
+        shows = await self._show_index.load()
+        self._sidebar.populate(shows)
 
-    @asyncSlot()
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
+    async def _on_refresh_index(self) -> None:
+        """Full refresh scan of config.library_path."""
+        if self._is_refreshing:
+            logger.info("Refresh already in progress, ignoring duplicate request")
+            return
+
+        library_path = self.config.library_path
+        if not library_path:
+            return
+
+        self._is_refreshing = True
+        self._sidebar.set_refresh_enabled(False)
+        from datetime import datetime
+
+        self.signal_bridge.log_received.emit(
+            {
+                "event": f"Starting full library rescan for {library_path}...",
+                "level": "info",
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+        self.progress_panel.set_status("Scanning full library...")
+        self.progress_panel.setVisible(True)
+        self.progress_panel.progress_bar.setRange(0, 0)
+
+        try:
+            scan_output = await self.pipeline_runner.library_scanner.scan(
+                Path(library_path)
+            )
+            shows = []
+            for node in scan_output.show_tree:
+                shows.append(
+                    ShowSummary(
+                        name=node.name,
+                        path=node.path,
+                        status=ShowStatus.READY
+                        if node.total_count > 0
+                        else ShowStatus.NO_SUBTITLE,
+                        episode_count=node.total_count,
+                        processed_count=0,
+                        subtitle_text=f"{node.total_count} episodes found",
+                    )
+                )
+            self._sidebar.populate(shows)
+            await self._show_index.save(shows)
+            self.progress_panel.setVisible(False)
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": f"Library rescan completed: {len(shows)} shows found.",
+                    "level": "info",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+        except (AnimeStudioError, OSError) as e:
+            logger.error(f"Refresh failed: {e}")
+            self.progress_panel.set_error()
+            self.progress_panel.set_status(f"Refresh failed: {e}")
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": f"Library rescan failed: {e}",
+                    "level": "error",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+        finally:
+            self._is_refreshing = False
+            self._sidebar.set_refresh_enabled(True)
+
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
+    async def _on_show_selected(self, name: str, path: Path) -> None:
+        """Load episodes for selected show into EpisodeTableWidget."""
+        self._current_show_name = name
+        self._current_show_path = Path(path)
+        self._show_name_label.setText(name)
+
+        self.progress_panel.set_status("Scanning folder...")
+        self.progress_panel.setVisible(True)
+        self.progress_panel.progress_bar.setRange(0, 0)
+
+        try:
+            episodes = await self.pipeline_runner.library_scanner.scan_folder(
+                Path(path)
+            )
+            self._episode_table.populate(episodes.episodes)
+            self._show_subtitle_label.setText(
+                f" ({len(episodes.episodes)} episodes found)"
+            )
+            self.run_button.setText("Run 0 selected")
+            self.run_button.setEnabled(False)
+            self.progress_panel.setVisible(False)
+        except (AnimeStudioError, OSError) as e:
+            logger.error(f"Failed to scan folder: {e}")
+            self.progress_panel.set_error()
+            self.progress_panel.set_status(f"Scan failed: {e}")
+
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
+    async def _on_add_folder(self, path: Path | None = None) -> None:
+        """Open folder dialog or accept path, scan, add to sidebar."""
+        if path is None:
+            folder = QFileDialog.getExistingDirectory(
+                self, "Select Show Folder to Add", ""
+            )
+            if not folder:
+                return
+            path = Path(folder)
+        else:
+            path = Path(path)
+
+        self.progress_panel.set_status(f"Adding show: {path.name}...")
+        self.progress_panel.setVisible(True)
+        self.progress_panel.progress_bar.setRange(0, 0)
+
+        try:
+            result = await self.pipeline_runner.library_scanner.scan_folder(path)
+            status = ShowStatus.READY if result.episodes else ShowStatus.NO_SUBTITLE
+            summary = ShowSummary(
+                name=path.name,
+                path=path,
+                status=status,
+                episode_count=len(result.episodes),
+                processed_count=0,
+                subtitle_text=f"{len(result.episodes)} episodes found",
+            )
+            self._sidebar.add_show(summary)
+            await self._show_index.add_show(summary)
+            self.progress_panel.setVisible(False)
+        except (AnimeStudioError, OSError) as e:
+            logger.error(f"Failed to add folder: {e}")
+            self.progress_panel.set_error()
+            self.progress_panel.set_status(f"Failed to add folder: {e}")
+
+    def _on_selection_changed(self, paths: list[Path]) -> None:
+        count = len(paths)
+        self.run_button.setText(f"Run {count} selected")
+        self.run_button.setEnabled(count > 0)
+
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_run_click(self) -> None:
         """Trigger the forensics pipeline runner asynchronously without blocking the UI thread."""
-        library_path = self.library_picker.get_path()
+        library_path = self.config.library_path or (
+            self._current_show_path.parent
+            if hasattr(self, "_current_show_path")
+            else None
+        )
         if not library_path:
             QMessageBox.warning(
                 self,
@@ -163,51 +377,99 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Lock UI controls during active pipeline run
-        self._pipeline_running = True
-        self.run_button.setEnabled(False)
-        self.library_picker.setEnabled(False)
-        self.results_table.clear_results()
-
         from src.gui.messages import ProgressStage, ProgressState
         from src.gui.bootstrap import map_pipeline_report
 
         pipeline_mod = importlib.import_module("src.models.pipeline")
         PipelineConfig = pipeline_mod.PipelineConfig
 
-        # Initial state update
+        # Lock UI controls during active pipeline run
+        self._pipeline_running = True
+        self.run_button.setEnabled(False)
+        self.undo_button.setEnabled(False)
+        self.settings_btn.setEnabled(False)
+        self.stop_button.setVisible(True)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("Stop")
+        self.results_table.clear_results()
+
+        # Update show status to processing in sidebar/index
+        if hasattr(self, "_current_show_path"):
+            self._sidebar.update_show_status(
+                self._current_show_path, ShowStatus.PROCESSING
+            )
+            await self._show_index.update_status(
+                self._current_show_path, ShowStatus.PROCESSING
+            )
+
         self.signal_bridge.progress_updated.emit(
             ProgressState(
                 stage=ProgressStage.SCANNING,
-                status_text="Initiating library analysis...",
+                status_text="Executing pipeline...",
             )
         )
 
+        self._stop_event = asyncio.Event()
+
         try:
+            # Gather selected paths from EpisodeTableWidget
+            selected = self._episode_table.get_selected_paths()
+
             config = PipelineConfig(
                 library_path=p,
                 dry_run=self.config.dry_run
                 if hasattr(self.config, "dry_run")
                 else False,
                 sync_enabled=True,
+                selected_paths=frozenset(selected) if selected else None,
             )
 
-            # Await the core runner's run method asynchronously on the qasync event loop
-            report = await self.pipeline_runner.run(config)
+            report = await self.pipeline_runner.run(
+                config,
+                stop_event=self._stop_event,
+                checkpoint_manager=self._checkpoint_manager,
+                undo_service=self._undo_service,
+            )
 
-            # Map domain report to UI result structures
             run_result = map_pipeline_report(report, p, config.dry_run)
             self.signal_bridge.pipeline_finished.emit(run_result)
 
-            # Emit final success state
-            self.signal_bridge.progress_updated.emit(
-                ProgressState(
-                    stage=ProgressStage.COMPLETE,
-                    status_text="Pipeline executed successfully!",
+            # Update statuses on completion
+            final_status = ShowStatus.ALL_DONE
+            for ep_res in run_result.episodes:
+                status_str = (
+                    ep_res.status.value
+                    if hasattr(ep_res.status, "value")
+                    else str(ep_res.status)
                 )
-            )
+                self._episode_table.update_episode_status(
+                    ep_res.episode_path, status_str
+                )
+                if status_str.lower() in ("failed", "error"):
+                    final_status = ShowStatus.WARNING
 
-        except Exception as e:
+            if hasattr(self, "_current_show_path"):
+                self._sidebar.update_show_status(self._current_show_path, final_status)
+                await self._show_index.update_status(
+                    self._current_show_path, final_status
+                )
+
+            if self._stop_event.is_set():
+                self.signal_bridge.progress_updated.emit(
+                    ProgressState(
+                        stage=ProgressStage.COMPLETE,
+                        status_text="Pipeline stopped by user. Checkpoint saved.",
+                    )
+                )
+            else:
+                self.signal_bridge.progress_updated.emit(
+                    ProgressState(
+                        stage=ProgressStage.COMPLETE,
+                        status_text="Pipeline executed successfully!",
+                    )
+                )
+
+        except (AnimeStudioError, OSError, ValueError, RuntimeError) as e:
             logger.error(f"Forensics pipeline execution failed: {e}")
             self.signal_bridge.progress_updated.emit(
                 ProgressState(
@@ -216,7 +478,14 @@ class MainWindow(QMainWindow):
             )
             self.signal_bridge.pipeline_error.emit(str(e))
 
-            # Display critical error modal
+            if hasattr(self, "_current_show_path"):
+                self._sidebar.update_show_status(
+                    self._current_show_path, ShowStatus.WARNING
+                )
+                await self._show_index.update_status(
+                    self._current_show_path, ShowStatus.WARNING
+                )
+
             from src.gui.messages import ErrorInfo
             from src.gui.widgets.error_dialog import show_error_dialog
 
@@ -229,11 +498,151 @@ class MainWindow(QMainWindow):
 
         finally:
             self._pipeline_running = False
+            self._stop_event = None
+            self.stop_button.setVisible(False)
             self.run_button.setEnabled(True)
-            self.library_picker.setEnabled(True)
+            self.undo_button.setEnabled(True)
+            self.settings_btn.setEnabled(True)
 
-    def _on_log_received(self, log_entry: dict) -> None:
-        """Slot to intercept structured log entries and map them to progress updates."""
+    def _on_stop_click(self) -> None:
+        """Handle Stop button click by setting the stop event."""
+        if self._stop_event:
+            self._stop_event.set()
+            self.stop_button.setEnabled(False)
+            self.stop_button.setText("Stopping...")
+
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
+    async def _on_undo_click(self) -> None:
+        """Open the Undo dialog and run the selected undo action."""
+        if not self._undo_service:
+            return
+        library_path = self.config.library_path or (
+            self._current_show_path.parent
+            if hasattr(self, "_current_show_path")
+            else None
+        )
+        if not library_path:
+            QMessageBox.warning(self, "No Library", "Select a library first.")
+            return
+
+        manifests = await self._undo_service.list_runs()
+        if not manifests:
+            QMessageBox.information(self, "No History", "No pipeline runs to undo.")
+            return
+
+        from src.gui.widgets.undo_dialog import UndoDialog
+
+        dialog = UndoDialog(self)
+        dialog.populate(manifests)
+
+        dialog.undo_requested.connect(
+            lambda r: asyncio.ensure_future(self._execute_undo(manifests, r))
+        )
+        dialog.exec()
+
+    async def _execute_undo(
+        self, manifests: list[RunManifest], result: dict[str, Any]
+    ) -> None:
+        idx = result["manifest_index"]
+        manifest = manifests[idx]
+        level = result["level"]
+
+        self.undo_button.setEnabled(False)
+
+        try:
+            if level == "full":
+                undo_res = await self._undo_service.undo_run(manifest)
+            elif level == "show":
+                show_name = result["show_names"][0] if result.get("show_names") else ""
+                undo_res = await self._undo_service.undo_show(manifest, show_name)
+            else:
+                ep_name = (
+                    result["episode_names"][0] if result.get("episode_names") else ""
+                )
+                target_path = None
+                for ep in manifest.episodes_processed:
+                    if Path(ep.episode_path).name == ep_name:
+                        target_path = ep.episode_path
+                        break
+                if target_path:
+                    undo_res = await self._undo_service.undo_episode(
+                        manifest, target_path
+                    )
+                else:
+                    undo_service_mod = importlib.import_module("src.core.undo_service")
+                    UndoResult = undo_service_mod.UndoResult
+                    undo_res = UndoResult(failed=1)
+
+            msg = (
+                f"Undo completed.\n\n"
+                f"Restored: {undo_res.restored}\n"
+                f"Conflicts: {undo_res.conflicts}\n"
+                f"Missing: {undo_res.missing}\n"
+                f"Failed: {undo_res.failed}"
+            )
+            QMessageBox.information(self, "Undo Result", msg)
+
+            from datetime import datetime
+
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": f"Undo completed. Restored: {undo_res.restored}, Conflicts: {undo_res.conflicts}, Missing: {undo_res.missing}",
+                    "level": "info",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+        except (AnimeStudioError, OSError, ValueError, KeyError) as e:
+            logger.error(f"Undo operation failed: {e}")
+            QMessageBox.critical(self, "Undo Failed", f"Operation failed: {e}")
+        finally:
+            self.undo_button.setEnabled(True)
+
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
+    async def _on_export_log(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        from datetime import datetime
+
+        entries = self._log_bridge.get_session_log()
+        if not entries:
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": "No log data to export",
+                    "level": "info",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+            return
+
+        default_name = f"anime_studio_{datetime.now():%Y-%m-%d_%H-%M}.txt"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Log",
+            str(Path.home() / default_name),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            log_export_mod = importlib.import_module("src.core.log_export")
+            await log_export_mod.export_log_to_file(entries, Path(path))
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": f"Log exported to {path}",
+                    "level": "info",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+        except OSError as e:
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": f"Log export failed: {e}",
+                    "level": "error",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+
+    def _on_log_received(self, log_entry: dict[str, Any]) -> None:
         stage_val = log_entry.get("stage")
         if stage_val:
             current = log_entry.get("progress_current")
@@ -279,9 +688,8 @@ class MainWindow(QMainWindow):
             logger.info("Application closing gracefully")
             event.accept()
 
-    @asyncSlot()
+    @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_import_fonts_click(self) -> None:
-        """Handle 'Import Fonts' button click to let users manually select a folder to import."""
         from PySide6.QtWidgets import QFileDialog
 
         folder = QFileDialog.getExistingDirectory(
@@ -299,7 +707,7 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event: Any) -> None:
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
-            if any(self._is_valid_font_drop(url) for url in urls):
+            if any(self._is_valid_drop(url) for url in urls):
                 event.acceptProposedAction()
                 self.setStyleSheet("QMainWindow { border: 3px solid #4CAF50; }")
                 return
@@ -312,12 +720,23 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(self._default_style)
         urls = event.mimeData().urls()
         paths = [Path(url.toLocalFile()) for url in urls]
+
+        folders = [p for p in paths if p.is_dir()]
+        fonts = [
+            p for p in paths if p.is_file() and p.suffix.lower() in (".ttf", ".otf")
+        ]
+
         import asyncio
 
-        asyncio.ensure_future(self._handle_font_drop(paths))
+        if folders:
+            for folder in folders:
+                asyncio.ensure_future(self._on_add_folder(folder))
+        if fonts:
+            asyncio.ensure_future(self._handle_font_drop(fonts))
+
         event.acceptProposedAction()
 
-    def _is_valid_font_drop(self, url: Any) -> bool:
+    def _is_valid_drop(self, url: Any) -> bool:
         """Helper to validate if a dropped URL is a directory or font file."""
         local_file = url.toLocalFile()
         if not local_file:
@@ -327,18 +746,8 @@ class MainWindow(QMainWindow):
             return True
         return p.suffix.lower() in (".ttf", ".otf")
 
-    async def _handle_font_drop(self, paths: list[Path]) -> None:
-        """Handles font drop async by separating into dirs and files and importing."""
-        dirs = [p for p in paths if p.is_dir()]
-        files = [
-            p for p in paths if p.is_file() and p.suffix.lower() in (".ttf", ".otf")
-        ]
-
-        if dirs:
-            logger.info("Drag and drop: Ingesting directories", directories=dirs)
-            await self.font_ingestion_service.ingest_directories(
-                dirs, source="drag_drop"
-            )
+    async def _handle_font_drop(self, files: list[Path]) -> None:
+        """Handles font drop async."""
         if files:
-            logger.info("Drag and drop: Ingesting files", files=files)
+            logger.info(f"Drag and drop: Ingesting files: {files}")
             await self.font_ingestion_service.ingest_files(files, source="drag_drop")

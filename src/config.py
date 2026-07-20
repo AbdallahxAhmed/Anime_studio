@@ -18,6 +18,7 @@ class AppConfig(BaseModel):
     default_timeout_s: int = Field(default=120, ge=1)
     mux_timeout_s: int = Field(default=300, ge=1)
     trash_max_age_days: int = Field(default=30, ge=1)
+    max_run_history: int = Field(default=10, ge=1)
     circuit_breaker_cooldown_s: float = Field(default=60.0, ge=0.0)
     font_cache_path: Path | None = None
     startup_ping_timeout_s: float = Field(default=2.0, ge=0.0)
@@ -44,8 +45,8 @@ class AppConfig(BaseModel):
         lines = ["[app]"]
         # Use model_dump() for pydantic v2 compatible dict dump
         data = self.model_dump()
-        app_data = {k: v for k, v in data.items() if k != "subtitle"}
-        for key, value in app_data.items():
+        app_fields = {k: v for k, v in data.items() if k != "subtitle"}
+        for key, value in app_fields.items():
             if value is None:
                 continue
             if isinstance(value, Path):
@@ -54,19 +55,19 @@ class AppConfig(BaseModel):
             elif isinstance(value, str):
                 lines.append(f'{key} = "{value}"')
             elif isinstance(value, bool):
-                lines.append(f'{key} = {str(value).lower()}')
+                lines.append(f"{key} = {str(value).lower()}")
             else:
-                lines.append(f'{key} = {value}')
+                lines.append(f"{key} = {value}")
 
         lines.append("")
         lines.append("[subtitle]")
         for key, value in self.subtitle.model_dump().items():
             if isinstance(value, bool):
-                lines.append(f'{key} = {str(value).lower()}')
+                lines.append(f"{key} = {str(value).lower()}")
             elif isinstance(value, str):
                 lines.append(f'{key} = "{value}"')
             else:
-                lines.append(f'{key} = {value}')
+                lines.append(f"{key} = {value}")
 
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

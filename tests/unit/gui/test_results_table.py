@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
@@ -32,10 +33,11 @@ def test_results_model_data_roles() -> None:
     model = ResultsTableModel()
     result = EpisodeResult(
         name="Episode 01.mkv",
+        episode_path=Path("show/Episode 01.mkv"),
         status=EpisodeStatus.PARTIAL,
         fonts_found=3,
         fonts_missing=2,
-        error_summary="OTS sanitize failed on font XYZ"
+        error_summary="OTS sanitize failed on font XYZ",
     )
 
     model.add_result(result)
@@ -52,27 +54,54 @@ def test_results_model_data_roles() -> None:
     assert model.data(idx_status, Qt.ItemDataRole.DisplayRole) == "⚠ Partial"
     assert model.data(idx_found, Qt.ItemDataRole.DisplayRole) == 3
     assert model.data(idx_missing, Qt.ItemDataRole.DisplayRole) == 2
-    assert model.data(idx_details, Qt.ItemDataRole.DisplayRole) == "OTS sanitize failed on font XYZ"
+    assert (
+        model.data(idx_details, Qt.ItemDataRole.DisplayRole)
+        == "OTS sanitize failed on font XYZ"
+    )
 
     # 2. ForegroundRole check (Orange for PARTIAL)
     assert model.data(idx_status, Qt.ItemDataRole.ForegroundRole) == QColor("#FF9800")
     assert model.data(idx_name, Qt.ItemDataRole.ForegroundRole) is None
 
     # 3. TextAlignmentRole check
-    assert model.data(idx_status, Qt.ItemDataRole.TextAlignmentRole) == Qt.AlignmentFlag.AlignCenter
-    assert model.data(idx_name, Qt.ItemDataRole.TextAlignmentRole) == (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    assert (
+        model.data(idx_status, Qt.ItemDataRole.TextAlignmentRole)
+        == Qt.AlignmentFlag.AlignCenter
+    )
+    assert model.data(idx_name, Qt.ItemDataRole.TextAlignmentRole) == (
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    )
 
     # 4. ToolTipRole check
-    assert model.data(idx_status, Qt.ItemDataRole.ToolTipRole) == "OTS sanitize failed on font XYZ"
-    assert model.data(idx_details, Qt.ItemDataRole.ToolTipRole) == "OTS sanitize failed on font XYZ"
+    assert (
+        model.data(idx_status, Qt.ItemDataRole.ToolTipRole)
+        == "OTS sanitize failed on font XYZ"
+    )
+    assert (
+        model.data(idx_details, Qt.ItemDataRole.ToolTipRole)
+        == "OTS sanitize failed on font XYZ"
+    )
 
 
 def test_results_model_clear_and_set() -> None:
     """Verify set_results and clear model operations."""
     model = ResultsTableModel()
     results = [
-        EpisodeResult(name="Ep1", status=EpisodeStatus.COMPLETE, fonts_found=1, fonts_missing=0),
-        EpisodeResult(name="Ep2", status=EpisodeStatus.FAILED, fonts_found=0, fonts_missing=3, error_summary="fail")
+        EpisodeResult(
+            name="Ep1",
+            episode_path=Path("show/Ep1.mkv"),
+            status=EpisodeStatus.COMPLETE,
+            fonts_found=1,
+            fonts_missing=0,
+        ),
+        EpisodeResult(
+            name="Ep2",
+            episode_path=Path("show/Ep2.mkv"),
+            status=EpisodeStatus.FAILED,
+            fonts_found=0,
+            fonts_missing=3,
+            error_summary="fail",
+        ),
     ]
 
     model.set_results(results)
@@ -85,9 +114,15 @@ def test_results_model_clear_and_set() -> None:
 def test_results_table_widget_populate_and_clear() -> None:
     """Verify ResultsTableWidget populates from PipelineRunResult and clears logs."""
     widget = ResultsTableWidget()
-    
+
     episodes = [
-        EpisodeResult(name="Ep1.mkv", status=EpisodeStatus.COMPLETE, fonts_found=4, fonts_missing=0)
+        EpisodeResult(
+            name="Ep1.mkv",
+            episode_path=Path("show/Ep1.mkv"),
+            status=EpisodeStatus.COMPLETE,
+            fonts_found=4,
+            fonts_missing=0,
+        )
     ]
     run_result = PipelineRunResult(
         episodes=episodes,
@@ -95,7 +130,7 @@ def test_results_table_widget_populate_and_clear() -> None:
         report_path="report.md",
         total_fonts_found=4,
         total_fonts_missing=0,
-        dry_run=True
+        dry_run=True,
     )
 
     widget.populate(run_result)
