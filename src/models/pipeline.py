@@ -109,9 +109,16 @@ class ShowNode:
 
 
 class PipelineConfig(BaseModel):
+    """Configuration for one pipeline run.
+
+    ``library_path`` remains the canonical configured library identity. An
+    optional ``discovery_root`` narrows only this run's discovery scope.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     library_path: SerializablePath
+    discovery_root: Path | None = None
     dry_run: bool = False
     sync_enabled: bool = False
     anime_title: str | None = None

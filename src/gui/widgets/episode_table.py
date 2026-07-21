@@ -263,7 +263,7 @@ class EpisodeTableWidget(QWidget):
     def populate(self, episodes: list[LibraryScanResult]) -> None:
         """Populate the table with episodes."""
         self._model.populate(episodes)
-        self._all_selected = True
+        self._all_selected = bool(episodes)
         self._on_selection_updated()
 
     def get_selected_paths(self) -> list[Path]:
@@ -286,5 +286,9 @@ class EpisodeTableWidget(QWidget):
         if logicalIndex == 0:
             self._on_header_checkbox_clicked(not self._all_selected)
 
-    def _on_selection_updated(self, *args: Any) -> None:
-        self.selection_changed.emit(self.get_selected_paths())
+    def _on_selection_updated(self, *_args: object) -> None:
+        selected_paths = self.get_selected_paths()
+        self._all_selected = bool(selected_paths) and (
+            len(selected_paths) == self._model.rowCount()
+        )
+        self.selection_changed.emit(selected_paths)

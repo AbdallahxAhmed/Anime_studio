@@ -183,3 +183,89 @@ def test_table_update_status_same_filename_different_directories(
     # Season 1 episode01.mkv must remain pending, Season 2 episode01.mkv updated
     assert table._model.data(table._model.index(0, 3)) == "pending"
     assert table._model.data(table._model.index(1, 3)) == "complete"
+
+
+def test_table_populate_zero_episodes_selection_state(mocker) -> None:
+    """Task 1: Population with zero episodes produces zero selected paths."""
+    table = EpisodeTableWidget()
+    mock_slot = mocker.Mock()
+    table.selection_changed.connect(mock_slot)
+    table.populate([])
+    assert table.get_selected_paths() == []
+    mock_slot.assert_called_once_with([])
+
+
+def test_table_populate_n_episodes_selection_state_synchronized(mocker) -> None:
+    """Task 1: Population with N episodes synchronizes checkboxes, selected paths, and emitted count."""
+    table = EpisodeTableWidget()
+    mock_slot = mocker.Mock()
+    table.selection_changed.connect(mock_slot)
+
+    episodes = [
+        LibraryScanResult(episode_path=Path("ep1.mkv"), anime_title="Show"),
+        LibraryScanResult(episode_path=Path("ep2.mkv"), anime_title="Show"),
+        LibraryScanResult(episode_path=Path("ep3.mkv"), anime_title="Show"),
+    ]
+    table.populate(episodes)
+
+    # All N episodes checked by default in model
+    selected = table.get_selected_paths()
+    assert len(selected) == 3
+    assert selected == [Path("ep1.mkv"), Path("ep2.mkv"), Path("ep3.mkv")]
+
+    # Check emission during populate
+    mock_slot.assert_called_with(selected)
+
+
+def test_table_select_single_and_multiple_rows(mocker) -> None:
+    """Task 1: Selecting 1 row or multiple rows emits exact count."""
+    table = EpisodeTableWidget()
+    episodes = [
+        LibraryScanResult(episode_path=Path("ep1.mkv"), anime_title="Show"),
+        LibraryScanResult(episode_path=Path("ep2.mkv"), anime_title="Show"),
+    ]
+    table.populate(episodes)
+
+    mock_slot = mocker.Mock()
+    table.selection_changed.connect(mock_slot)
+
+    # Uncheck all, then check row 0
+    table.set_all_checked(False)
+    assert table.get_selected_paths() == []
+
+    table._model.setData(
+        table._model.index(0, 0),
+        Qt.CheckState.Checked,
+        Qt.ItemDataRole.CheckStateRole,
+    )
+    assert table.get_selected_paths() == [Path("ep1.mkv")]
+    mock_slot.assert_called_with([Path("ep1.mkv")])
+
+    table._model.setData(
+        table._model.index(1, 0),
+        Qt.CheckState.Checked,
+        Qt.ItemDataRole.CheckStateRole,
+    )
+    assert table.get_selected_paths() == [Path("ep1.mkv"), Path("ep2.mkv")]
+    mock_slot.assert_called_with([Path("ep1.mkv"), Path("ep2.mkv")])
+
+
+def test_table_repopulate_resets_selection_count(mocker) -> None:
+    """Task 1: Re-populating table with another show resets selection count correctly."""
+    table = EpisodeTableWidget()
+    table.populate(
+        [
+            LibraryScanResult(episode_path=Path("showA_ep1.mkv"), anime_title="Show A"),
+            LibraryScanResult(episode_path=Path("showA_ep2.mkv"), anime_title="Show A"),
+        ]
+    )
+    assert len(table.get_selected_paths()) == 2
+
+    # Re-populate with Show B (1 episode)
+    table.populate(
+        [
+            LibraryScanResult(episode_path=Path("showB_ep1.mkv"), anime_title="Show B"),
+        ]
+    )
+    assert len(table.get_selected_paths()) == 1
+    assert table.get_selected_paths() == [Path("showB_ep1.mkv")]

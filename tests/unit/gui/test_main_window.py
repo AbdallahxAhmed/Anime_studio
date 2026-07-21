@@ -3,8 +3,8 @@ from typing import Any
 import pytest
 import asyncio
 from pathlib import Path
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from src.gui.main_window import MainWindow
 from src.models.report import PipelineReport
@@ -58,6 +58,20 @@ class MockIndexManager:
         pass
 
 
+def _set_active_show(window: MainWindow, path: Path, name: str = "Test Show") -> Path:
+    episode_path = path / "episode_01.mkv"
+    window._display_scan_result(
+        name,
+        path,
+        LibraryScanOutput(
+            episodes=[LibraryScanResult(episode_path=episode_path, anime_title=name)],
+            font_directories=[],
+            show_tree=(),
+        ),
+    )
+    return episode_path
+
+
 @pytest.mark.asyncio
 async def test_main_window_successful_run(mocker, tmp_path: Path) -> None:
     """Verify that a successful pipeline run locks the UI, updates progress, and populates results."""
@@ -87,8 +101,8 @@ async def test_main_window_successful_run(mocker, tmp_path: Path) -> None:
         font_ingestion_service=mock_ingestion,
         show_index_manager=mock_index,
     )
-
-    window.run_button.setEnabled(True)
+    show_path = tmp_path / "Ranma"
+    episode_path = _set_active_show(window, show_path, "Ranma Display Name")
 
     # Execute underlying coroutine directly to bypass qasync scheduling in test environment
     await window._on_run_click.__wrapped__(window)
@@ -97,6 +111,9 @@ async def test_main_window_successful_run(mocker, tmp_path: Path) -> None:
     mock_runner.run.assert_called_once()
     config_arg = mock_runner.run.call_args[0][0]
     assert config_arg.library_path == tmp_path
+    assert config_arg.discovery_root == show_path.resolve()
+    assert config_arg.anime_title == "Ranma Display Name"
+    assert config_arg.selected_paths == frozenset({episode_path.resolve()})
 
     # Assert UI re-enabled
     assert window.run_button.isEnabled() is True
@@ -128,8 +145,7 @@ async def test_main_window_failed_run(mocker, tmp_path: Path) -> None:
         font_ingestion_service=mock_ingestion,
         show_index_manager=mock_index,
     )
-
-    window.run_button.setEnabled(True)
+    _set_active_show(window, tmp_path / "Ranma", "Ranma Display Name")
 
     await window._on_run_click.__wrapped__(window)
 
@@ -139,6 +155,31 @@ async def test_main_window_failed_run(mocker, tmp_path: Path) -> None:
     # Assert UI re-enabled
     assert window.run_button.isEnabled() is True
     assert window._pipeline_running is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_run_selected_requires_active_show(
+    mocker, tmp_path: Path
+) -> None:
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock()
+    warning = mocker.patch.object(QMessageBox, "warning")
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    await window._on_run_click.__wrapped__(window)
+
+    mock_runner.run.assert_not_called()
+    warning.assert_called_once_with(
+        window,
+        "No Show Selected",
+        "Please select a show before running selected episodes.",
+    )
 
 
 @pytest.mark.asyncio
@@ -306,9 +347,79 @@ async def test_main_window_add_show_folder(mocker, tmp_path: Path) -> None:
     show_path = tmp_path / "My Awesome Show"
     await window._on_add_folder.__wrapped__(window, show_path)
 
-    mock_runner.library_scanner.scan_folder.assert_called_once_with(show_path)
+    assert mock_runner.library_scanner.scan_folder.call_count == 1
     mock_index.add_show.assert_called_once()
     assert window._sidebar._list_widget.count() == 1
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_show_folder_single_scan_and_sync(
+    mocker, tmp_path: Path
+) -> None:
+    """Verify Add Folder invokes scan_folder() exactly once while populating sidebar, displaying episodes, and synchronizing Run button."""
+    show_path = tmp_path / "Ranma"
+    episodes = [
+        LibraryScanResult(episode_path=show_path / "ep1.mkv", anime_title="Ranma"),
+        LibraryScanResult(episode_path=show_path / "ep2.mkv", anime_title="Ranma"),
+    ]
+    mock_scan_output = LibraryScanOutput(
+        episodes=episodes, font_directories=[], show_tree=()
+    )
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(
+        return_value=mock_scan_output
+    )
+
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.add_show = mocker.AsyncMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+        show_index_manager=mock_index,
+    )
+
+    await window._on_add_folder.__wrapped__(window, show_path)
+
+    # Invokes scan_folder() EXACTLY ONCE
+    assert mock_runner.library_scanner.scan_folder.call_count == 1
+    mock_runner.library_scanner.scan_folder.assert_called_once_with(show_path)
+
+    # Adds ShowSummary to index
+    mock_index.add_show.assert_called_once()
+
+    # Populates sidebar
+    assert window._sidebar._list_widget.count() == 1
+
+    # Displays discovered episodes in EpisodeTableWidget immediately
+    assert window._episode_table._model.rowCount() == 2
+    assert window._episode_table.get_selected_paths() == [
+        show_path / "ep1.mkv",
+        show_path / "ep2.mkv",
+    ]
+    assert all(
+        window._episode_table._model.data(
+            window._episode_table._model.index(row, 0),
+            Qt.ItemDataRole.CheckStateRole,
+        )
+        == Qt.CheckState.Checked
+        for row in range(2)
+    )
+
+    # Synchronizes Run button count and enabled state
+    assert window.run_button.text() == "Run 2 selected"
+    assert window.run_button.isEnabled() is True
+    assert not hasattr(window, "_pending_scan_output")
+
+    # An explicit later sidebar selection intentionally performs a fresh scan.
+    await window._on_show_selected.__wrapped__(window, "Ranma", show_path)
+    assert mock_runner.library_scanner.scan_folder.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -344,6 +455,74 @@ async def test_main_window_show_selected(mocker, tmp_path: Path) -> None:
     )
     mock_runner.library_scanner.scan.assert_not_called()
     assert window._episode_table._model.rowCount() == 1
+
+
+@pytest.mark.asyncio
+async def test_main_window_run_button_tracks_episode_model_selection(
+    mocker, tmp_path: Path
+) -> None:
+    """The Run button always reflects the episode model's selected paths."""
+    show_path = tmp_path / "Selection Show"
+    episodes = [
+        LibraryScanResult(episode_path=show_path / "01.mkv", anime_title="Selection"),
+        LibraryScanResult(episode_path=show_path / "02.mkv", anime_title="Selection"),
+        LibraryScanResult(episode_path=show_path / "03.mkv", anime_title="Selection"),
+    ]
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(
+        return_value=LibraryScanOutput(
+            episodes=episodes, font_directories=[], show_tree=()
+        )
+    )
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    await window._on_show_selected.__wrapped__(window, "Selection", show_path)
+    assert window._episode_table.get_selected_paths() == [
+        show_path / "01.mkv",
+        show_path / "02.mkv",
+        show_path / "03.mkv",
+    ]
+    assert window.run_button.text() == "Run 3 selected"
+    assert window.run_button.isEnabled() is True
+
+    window._episode_table.set_all_checked(False)
+    assert window._episode_table.get_selected_paths() == []
+    assert window.run_button.text() == "Run 0 selected"
+    assert window.run_button.isEnabled() is False
+
+    for row, expected_count in ((0, 1), (1, 2)):
+        window._episode_table._model.setData(
+            window._episode_table._model.index(row, 0),
+            Qt.CheckState.Checked,
+            Qt.ItemDataRole.CheckStateRole,
+        )
+        assert len(window._episode_table.get_selected_paths()) == expected_count
+        assert window.run_button.text() == f"Run {expected_count} selected"
+        assert window.run_button.isEnabled() is True
+
+    window._episode_table.set_all_checked(True)
+    assert len(window._episode_table.get_selected_paths()) == 3
+    assert window.run_button.text() == "Run 3 selected"
+
+    window._episode_table.populate(
+        [
+            LibraryScanResult(
+                episode_path=tmp_path / "Other Show" / "01.mkv",
+                anime_title="Other",
+            )
+        ]
+    )
+    assert window._episode_table.get_selected_paths() == [
+        tmp_path / "Other Show" / "01.mkv"
+    ]
+    assert window.run_button.text() == "Run 1 selected"
+    assert window.run_button.isEnabled() is True
 
 
 # --- GAP 2: Explicit Refresh / FR-015 Tests ---
@@ -637,8 +816,7 @@ async def test_main_window_mid_execution_ui_locking(mocker, tmp_path: Path) -> N
         show_index_manager=mock_index,
     )
     window.show()
-
-    window.run_button.setEnabled(True)
+    _set_active_show(window, tmp_path / "Test Show")
 
     run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
 
@@ -692,6 +870,7 @@ async def test_main_window_mid_execution_ui_locking_failure_cleanup(
         show_index_manager=mock_index,
     )
     window.show()
+    _set_active_show(window, tmp_path / "Test Show")
 
     run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
     await entered_run_event.wait()
@@ -833,3 +1012,706 @@ async def test_qt_signal_qasync_slot_bridge_smoke_test(mocker, tmp_path: Path) -
 
     # Verify that the async scanner was called without calling .__wrapped__
     mock_runner.library_scanner.scan.assert_called_once_with(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_folder_library_root_prevents_scan_and_warns(
+    mocker, tmp_path: Path
+) -> None:
+    """Task 2: Selecting configured library root in Add Folder performs zero scans and shows QMessageBox."""
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock()
+
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.add_show = mocker.AsyncMock()
+
+    mock_msgbox = mocker.patch("PySide6.QtWidgets.QMessageBox.information")
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+        show_index_manager=mock_index,
+    )
+
+    await window._on_add_folder.__wrapped__(window, tmp_path)
+
+    # Zero scans, zero index additions
+    mock_runner.library_scanner.scan_folder.assert_not_called()
+    mock_index.add_show.assert_not_called()
+    assert window._sidebar._list_widget.count() == 0
+
+    # User-facing explanation displayed
+    mock_msgbox.assert_called_once_with(
+        window,
+        "Library Root Selected",
+        "This is the configured library root. Use Refresh to rebuild the "
+        "complete library index, or select one individual show folder.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_folder_library_root_windows_case_insensitive(
+    mocker, tmp_path: Path
+) -> None:
+    """Task 2: Windows case variations of library root are safely matched."""
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock()
+
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+
+    mock_msgbox = mocker.patch("PySide6.QtWidgets.QMessageBox.information")
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+        show_index_manager=mock_index,
+    )
+
+    # Path variation with different case or slashes
+    variant_path = Path(str(tmp_path).upper())
+    await window._on_add_folder.__wrapped__(window, variant_path)
+
+    mock_runner.library_scanner.scan_folder.assert_not_called()
+    mock_msgbox.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_folder_child_show_folder_scans_normally(
+    mocker, tmp_path: Path
+) -> None:
+    """Task 2: Selecting a child show folder scans normally."""
+    mock_runner = mocker.MagicMock()
+    mock_scan_output = LibraryScanOutput(episodes=[], font_directories=[], show_tree=())
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(
+        return_value=mock_scan_output
+    )
+
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.add_show = mocker.AsyncMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+        show_index_manager=mock_index,
+    )
+
+    child_path = tmp_path / "SubShow"
+    await window._on_add_folder.__wrapped__(window, child_path)
+
+    mock_runner.library_scanner.scan_folder.assert_called_once_with(child_path)
+    mock_index.add_show.assert_called_once()
+    assert window._sidebar._list_widget.count() == 1
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_folder_cancelled_dialog_is_a_no_op(
+    mocker, tmp_path: Path
+) -> None:
+    """Cancelling Add Folder does not scan, index, or change the sidebar."""
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.add_show = mocker.AsyncMock()
+    mocker.patch.object(QFileDialog, "getExistingDirectory", return_value="")
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+
+    await window._on_add_folder.__wrapped__(window)
+
+    mock_runner.library_scanner.scan_folder.assert_not_called()
+    mock_index.add_show.assert_not_called()
+    assert window._sidebar._list_widget.count() == 0
+
+
+@pytest.mark.asyncio
+async def test_main_window_refresh_index_multi_show_tree(
+    mocker, tmp_path: Path
+) -> None:
+    """Task 4: Full refresh converts show_tree with multiple top-level shows into separate ShowSummary rows."""
+    from src.models.pipeline import EpisodeContext, ShowNode, SubFolderNode
+
+    node1 = ShowNode(
+        name="Bleach",
+        path=tmp_path / "Bleach",
+        sub_folders=(
+            SubFolderNode(
+                name="Season 2",
+                path=tmp_path / "Bleach" / "Season 2",
+                episodes=(
+                    EpisodeContext(
+                        scan_result=LibraryScanResult(
+                            episode_path=tmp_path / "Bleach" / "Season 2" / "02.mkv",
+                            anime_title="Bleach",
+                        )
+                    ),
+                ),
+            ),
+        ),
+        episodes=(
+            EpisodeContext(
+                scan_result=LibraryScanResult(
+                    episode_path=tmp_path / "Bleach" / "01.mkv",
+                    anime_title="Bleach",
+                )
+            ),
+        ),
+    )
+    node2 = ShowNode(
+        name="Naruto",
+        path=tmp_path / "Naruto",
+        sub_folders=(),
+        episodes=(
+            EpisodeContext(
+                scan_result=LibraryScanResult(
+                    episode_path=tmp_path / "Naruto" / "01.mkv",
+                    anime_title="Naruto",
+                )
+            ),
+            EpisodeContext(
+                scan_result=LibraryScanResult(
+                    episode_path=tmp_path / "Naruto" / "02.mkv",
+                    anime_title="Naruto",
+                )
+            ),
+        ),
+    )
+
+    mock_runner = mocker.MagicMock()
+    mock_scan_output = LibraryScanOutput(
+        episodes=[], font_directories=[], show_tree=(node1, node2)
+    )
+    mock_runner.library_scanner.scan = mocker.AsyncMock(return_value=mock_scan_output)
+
+    log_bridge = MockLogBridge()
+    config = MockConfig(tmp_path)
+    mock_ingestion = mocker.MagicMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.save = mocker.AsyncMock()
+
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=log_bridge,
+        config=config,
+        font_ingestion_service=mock_ingestion,
+        show_index_manager=mock_index,
+    )
+
+    await window._on_refresh_index.__wrapped__(window)
+
+    # Sidebar receives two top-level ShowSummary rows, never one root "Anime" row.
+    assert window._sidebar._list_widget.count() == 2
+    saved_shows = mock_index.save.call_args.args[0]
+    assert [(show.name, show.path, show.episode_count) for show in saved_shows] == [
+        ("Bleach", tmp_path / "Bleach", 2),
+        ("Naruto", tmp_path / "Naruto", 2),
+    ]
+    assert all(show.name != "Anime" for show in saved_shows)
+
+
+def _scan_output(path: Path, name: str) -> LibraryScanOutput:
+    return LibraryScanOutput(
+        episodes=[LibraryScanResult(episode_path=path / "01.mkv", anime_title=name)],
+        font_directories=[],
+        show_tree=(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_main_window_show_selection_latest_request_wins(
+    mocker, tmp_path: Path
+) -> None:
+    """A late scan result must not replace the most recent show selection."""
+    show_a = tmp_path / "Show A"
+    show_b = tmp_path / "Show B"
+    a_started = asyncio.Event()
+    release_a = asyncio.Event()
+
+    async def scan_folder(path: Path) -> LibraryScanOutput:
+        if path == show_a.resolve():
+            a_started.set()
+            await release_a.wait()
+            return _scan_output(show_a, "Show A")
+        return _scan_output(show_b, "Show B")
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    task_a = asyncio.create_task(
+        window._on_show_selected.__wrapped__(window, "Show A", show_a)
+    )
+    await a_started.wait()
+    await window._on_show_selected.__wrapped__(window, "Show B", show_b)
+    release_a.set()
+    await task_a
+
+    assert window._current_show_path == show_b.resolve()
+    assert window._current_show_name == "Show B"
+    assert window.run_button.isEnabled() is True
+
+
+@pytest.mark.asyncio
+async def test_main_window_failed_current_selection_clears_previous_show(
+    mocker, tmp_path: Path
+) -> None:
+    """A current scan error leaves no prior show or checked episodes runnable."""
+    from src.errors import AnimeStudioError
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(
+        side_effect=AnimeStudioError("unreadable show")
+    )
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+    _set_active_show(window, tmp_path / "Old", "Old")
+
+    await window._on_show_selected.__wrapped__(window, "Broken", tmp_path / "Broken")
+
+    assert window._current_show_path is None
+    assert window._current_show_name is None
+    assert window._episode_table.get_selected_paths() == []
+    assert window.run_button.isEnabled() is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_stale_selection_failure_cannot_replace_newer_success(
+    mocker, tmp_path: Path
+) -> None:
+    """An older failed scan is discarded after a newer successful selection."""
+    from src.errors import AnimeStudioError
+
+    show_a = tmp_path / "Show A"
+    show_b = tmp_path / "Show B"
+    a_started = asyncio.Event()
+    release_a = asyncio.Event()
+
+    async def scan_folder(path: Path) -> LibraryScanOutput:
+        if path == show_a.resolve():
+            a_started.set()
+            await release_a.wait()
+            raise AnimeStudioError("old request failed")
+        return _scan_output(show_b, "Show B")
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    task_a = asyncio.create_task(
+        window._on_show_selected.__wrapped__(window, "Show A", show_a)
+    )
+    await a_started.wait()
+    await window._on_show_selected.__wrapped__(window, "Show B", show_b)
+    release_a.set()
+    await task_a
+
+    assert window._current_show_path == show_b.resolve()
+    assert window._show_name_label.text() == "Show B"
+
+
+@pytest.mark.asyncio
+async def test_main_window_refresh_invalidates_active_show_and_late_scan(
+    mocker, tmp_path: Path
+) -> None:
+    """Refresh clears active state and prevents an older folder scan from applying."""
+    show_path = tmp_path / "Old"
+    selection_started = asyncio.Event()
+    release_selection = asyncio.Event()
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def scan_folder(path: Path) -> LibraryScanOutput:
+        selection_started.set()
+        await release_selection.wait()
+        return _scan_output(path, "Old")
+
+    async def scan_library(path: Path) -> LibraryScanOutput:
+        refresh_started.set()
+        await release_refresh.wait()
+        return LibraryScanOutput(episodes=[], font_directories=[], show_tree=())
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    mock_runner.library_scanner.scan = mocker.AsyncMock(side_effect=scan_library)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.save = mocker.AsyncMock()
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+
+    selection_task = asyncio.create_task(
+        window._on_show_selected.__wrapped__(window, "Old", show_path)
+    )
+    await selection_started.wait()
+    refresh_task = asyncio.create_task(window._on_refresh_index.__wrapped__(window))
+    await refresh_started.wait()
+
+    assert window._current_show_path is None
+    assert window._episode_table.get_selected_paths() == []
+    assert window.run_button.isEnabled() is False
+
+    release_selection.set()
+    await selection_task
+    release_refresh.set()
+    await refresh_task
+
+    assert window._current_show_path is None
+    assert window.run_button.isEnabled() is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_refresh_failure_leaves_no_stale_show(
+    mocker, tmp_path: Path
+) -> None:
+    """A failed refresh must not restore the prior active show."""
+    from src.errors import AnimeStudioError
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan = mocker.AsyncMock(
+        side_effect=AnimeStudioError("refresh failed")
+    )
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+    _set_active_show(window, tmp_path / "Old", "Old")
+
+    await window._on_refresh_index.__wrapped__(window)
+
+    assert window._current_show_path is None
+    assert window.run_button.isEnabled() is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_folder_late_result_does_not_replace_selection(
+    mocker, tmp_path: Path
+) -> None:
+    """A completed Add Folder scan is indexed but cannot overwrite newer selection UI."""
+    add_path = tmp_path / "Added"
+    show_b = tmp_path / "Show B"
+    add_started = asyncio.Event()
+    release_add = asyncio.Event()
+
+    async def scan_folder(path: Path) -> LibraryScanOutput:
+        if path == add_path.resolve():
+            add_started.set()
+            await release_add.wait()
+            return _scan_output(add_path, "Added")
+        return _scan_output(show_b, "Show B")
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.add_show = mocker.AsyncMock()
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+
+    add_task = asyncio.create_task(window._on_add_folder.__wrapped__(window, add_path))
+    await add_started.wait()
+    await window._on_show_selected.__wrapped__(window, "Show B", show_b)
+    release_add.set()
+    await add_task
+
+    mock_index.add_show.assert_awaited_once()
+    assert mock_runner.library_scanner.scan_folder.call_count == 2
+    assert window._current_show_path == show_b.resolve()
+    assert window._show_name_label.text() == "Show B"
+
+
+@pytest.mark.asyncio
+async def test_main_window_run_snapshots_show_and_locks_navigation(
+    mocker, tmp_path: Path
+) -> None:
+    """Run config and persistent statuses retain Show A despite later UI mutation."""
+    status_started = asyncio.Event()
+    release_status = asyncio.Event()
+    statuses: list[tuple[Path, ShowStatus]] = []
+
+    async def update_status(path: Path, status: ShowStatus) -> None:
+        statuses.append((path, status))
+        if status is ShowStatus.PROCESSING:
+            status_started.set()
+            await release_status.wait()
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock(
+        return_value=PipelineReport(
+            run_timestamp=datetime.now(timezone.utc),
+            duration_ms=1.0,
+            anime_title="Show A",
+            episodes=[],
+            total_fonts_found=0,
+            genuine_misses=[],
+        )
+    )
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    show_a = tmp_path / "Show A"
+    episode_a = _set_active_show(window, show_a, "Show A")
+    window._sidebar.add_show(
+        ShowSummary(
+            name="Show A",
+            path=show_a.resolve(),
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="1 episode found",
+        )
+    )
+    runner_sidebar_statuses: list[ShowStatus] = []
+
+    async def run_with_visible_processing(
+        *_args: object, **_kwargs: object
+    ) -> PipelineReport:
+        show = window._sidebar._list_widget.item(0).data(Qt.ItemDataRole.UserRole)
+        runner_sidebar_statuses.append(show.status)
+        return mock_runner.run.return_value
+
+    mock_runner.run.side_effect = run_with_visible_processing
+
+    run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await status_started.wait()
+    assert window._sidebar._list_widget.isEnabled() is False
+    assert window._sidebar._add_btn.isEnabled() is False
+    assert window._sidebar.is_refresh_enabled() is False
+    assert (
+        window._sidebar._list_widget.item(0).data(Qt.ItemDataRole.UserRole).status
+        == ShowStatus.READY
+    )
+
+    window._invalidate_active_show()
+    _set_active_show(window, tmp_path / "Show B", "Show B")
+    release_status.set()
+    await run_task
+
+    config_arg = mock_runner.run.call_args.args[0]
+    assert config_arg.discovery_root == show_a.resolve()
+    assert config_arg.anime_title == "Show A"
+    assert config_arg.selected_paths == frozenset({episode_a.resolve()})
+    assert statuses == [
+        (show_a.resolve(), ShowStatus.PROCESSING),
+        (show_a.resolve(), ShowStatus.ALL_DONE),
+    ]
+    assert window._sidebar._list_widget.isEnabled() is True
+    assert window._sidebar._add_btn.isEnabled() is True
+    assert window._sidebar.is_refresh_enabled() is True
+    assert runner_sidebar_statuses == [ShowStatus.PROCESSING]
+
+
+@pytest.mark.asyncio
+async def test_main_window_run_failure_restores_navigation(
+    mocker, tmp_path: Path
+) -> None:
+    """Navigation locking is restored through the run failure cleanup path."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def failing_run(*_args: object, **_kwargs: object) -> PipelineReport:
+        started.set()
+        await release.wait()
+        raise RuntimeError("pipeline failed")
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock(side_effect=failing_run)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock()
+    mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    _set_active_show(window, tmp_path / "Show A", "Show A")
+
+    task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await started.wait()
+    assert window._sidebar._list_widget.isEnabled() is False
+    release.set()
+    await task
+
+    assert window._sidebar._list_widget.isEnabled() is True
+    assert window._sidebar._add_btn.isEnabled() is True
+    assert window._sidebar.is_refresh_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_main_window_initial_processing_status_failure_restores_ui(
+    mocker, tmp_path: Path
+) -> None:
+    """A failed initial status write reaches the same bounded run cleanup path."""
+    from src.errors import AnimeStudioError
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock()
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock(
+        side_effect=AnimeStudioError("index unavailable")
+    )
+    error_dialog = mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    show_a = tmp_path / "Show A"
+    _set_active_show(window, show_a, "Show A")
+    window._sidebar.add_show(
+        ShowSummary(
+            name="Show A",
+            path=show_a.resolve(),
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="1 episode found",
+        )
+    )
+    original_status = (
+        window._sidebar._list_widget.item(0).data(Qt.ItemDataRole.UserRole).status
+    )
+
+    await window._on_run_click.__wrapped__(window)
+
+    mock_runner.run.assert_not_called()
+    assert mock_index.update_status.await_count == 1
+    assert (
+        window._sidebar._list_widget.item(0).data(Qt.ItemDataRole.UserRole).status
+        == original_status
+    )
+    assert original_status is not ShowStatus.PROCESSING
+    assert window._pipeline_running is False
+    assert window.stop_button.isVisible() is False
+    assert window.stop_button.isEnabled() is True
+    assert window._sidebar._list_widget.isEnabled() is True
+    assert window._sidebar._add_btn.isEnabled() is True
+    assert window._sidebar.is_refresh_enabled() is True
+    assert window.run_button.isEnabled() is True
+    error_dialog.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_main_window_stale_run_does_not_update_newer_show_table(
+    mocker, tmp_path: Path
+) -> None:
+    """Programmatic reentrancy cannot apply Show A results to visible Show B."""
+    from src.models.report import EpisodeReport, EpisodeStatus
+
+    status_started = asyncio.Event()
+    release_status = asyncio.Event()
+    persistent_statuses: list[tuple[Path, ShowStatus]] = []
+
+    async def update_status(path: Path, status: ShowStatus) -> None:
+        persistent_statuses.append((path, status))
+        if status is ShowStatus.PROCESSING:
+            status_started.set()
+            await release_status.wait()
+
+    show_a = tmp_path / "Show A"
+    show_b = tmp_path / "Show B"
+    episode_a = show_a / "01.mkv"
+    report = PipelineReport(
+        run_timestamp=datetime.now(timezone.utc),
+        duration_ms=1.0,
+        anime_title="Show A",
+        episodes=[EpisodeReport(episode_path=episode_a, status=EpisodeStatus.COMPLETE)],
+        total_fonts_found=0,
+        genuine_misses=[],
+    )
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock(return_value=report)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    _set_active_show(window, show_a, "Show A")
+
+    run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await status_started.wait()
+    window._invalidate_active_show()
+    window._display_scan_result(
+        "Show B",
+        show_b,
+        _scan_output(show_b, "Show B"),
+    )
+    visible_update = mocker.spy(window._episode_table, "update_episode_status")
+
+    release_status.set()
+    await run_task
+
+    assert window._current_show_path == show_b
+    assert window._show_name_label.text() == "Show B"
+    assert (
+        window._episode_table._model.data(
+            window._episode_table._model.index(0, 3), Qt.ItemDataRole.DisplayRole
+        )
+        == "skipped"
+    )
+    visible_update.assert_not_called()
+    assert persistent_statuses == [
+        (show_a, ShowStatus.PROCESSING),
+        (show_a, ShowStatus.ALL_DONE),
+    ]

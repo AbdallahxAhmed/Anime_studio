@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+from os.path import normcase
 from typing import Any, TYPE_CHECKING
 from pathlib import Path
 from qasync import asyncSlot
@@ -30,7 +31,7 @@ from src.gui.widgets import (
     ShowSidebarWidget,
     EpisodeTableWidget,
 )
-from src.models.pipeline import ShowSummary, ShowStatus
+from src.models.pipeline import LibraryScanOutput, ShowSummary, ShowStatus
 
 logger = logging.getLogger("anime_studio.gui.main_window")
 
@@ -63,8 +64,9 @@ class MainWindow(QMainWindow):
         self._undo_service = undo_service
         self._pipeline_running = False
         self._is_refreshing = False
-        self._awaiting_selection = False
-        self._pending_scan_output = None
+        self._selection_generation = 0
+        self._current_show_name: str | None = None
+        self._current_show_path: Path | None = None
         self._stop_event: asyncio.Event | None = None
 
         # Initialize SignalBridge
@@ -228,8 +230,9 @@ class MainWindow(QMainWindow):
         if not library_path:
             return
 
+        self._invalidate_active_show()
         self._is_refreshing = True
-        self._sidebar.set_refresh_enabled(False)
+        self._sidebar.set_navigation_enabled(False)
         from datetime import datetime
 
         self.signal_bridge.log_received.emit(
@@ -284,31 +287,65 @@ class MainWindow(QMainWindow):
             )
         finally:
             self._is_refreshing = False
-            self._sidebar.set_refresh_enabled(True)
+            if not self._pipeline_running:
+                self._sidebar.set_navigation_enabled(True)
+
+    def _invalidate_active_show(self) -> int:
+        """Clear the active show and return its new selection generation."""
+        self._selection_generation += 1
+        self._current_show_name = None
+        self._current_show_path = None
+        self._show_name_label.setText("Select a show to start")
+        self._show_subtitle_label.setText("")
+        self._episode_table.populate([])
+        self.run_button.setText("Run 0 selected")
+        self.run_button.setEnabled(False)
+        return self._selection_generation
+
+    def _is_library_root(self, folder_path: Path) -> bool:
+        """Return whether a selected folder resolves to the configured library root."""
+        library_path = getattr(self.config, "library_path", None)
+        if not library_path:
+            return False
+
+        configured_root = Path(library_path).expanduser().resolve()
+        selected_root = folder_path.expanduser().resolve()
+        return normcase(str(configured_root)) == normcase(str(selected_root))
+
+    def _display_scan_result(
+        self, name: str, path: Path, scan_output: LibraryScanOutput
+    ) -> None:
+        """Display an already-computed folder scan without performing I/O."""
+        self._current_show_name = name
+        self._current_show_path = path
+        self._show_name_label.setText(name)
+        self._episode_table.populate(scan_output.episodes)
+        self._show_subtitle_label.setText(
+            f" ({len(scan_output.episodes)} episodes found)"
+        )
+        self.progress_panel.setVisible(False)
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_show_selected(self, name: str, path: Path) -> None:
         """Load episodes for selected show into EpisodeTableWidget."""
-        self._current_show_name = name
-        self._current_show_path = Path(path)
-        self._show_name_label.setText(name)
+        request_generation = self._invalidate_active_show()
+        requested_name = name
+        requested_path = Path(path).expanduser().resolve()
 
         self.progress_panel.set_status("Scanning folder...")
         self.progress_panel.setVisible(True)
         self.progress_panel.progress_bar.setRange(0, 0)
 
         try:
-            episodes = await self.pipeline_runner.library_scanner.scan_folder(
-                Path(path)
+            scan_output = await self.pipeline_runner.library_scanner.scan_folder(
+                requested_path
             )
-            self._episode_table.populate(episodes.episodes)
-            self._show_subtitle_label.setText(
-                f" ({len(episodes.episodes)} episodes found)"
-            )
-            self.run_button.setText("Run 0 selected")
-            self.run_button.setEnabled(False)
-            self.progress_panel.setVisible(False)
+            if request_generation != self._selection_generation:
+                return
+            self._display_scan_result(requested_name, requested_path, scan_output)
         except (AnimeStudioError, OSError) as e:
+            if request_generation != self._selection_generation:
+                return
             logger.error(f"Failed to scan folder: {e}")
             self.progress_panel.set_error()
             self.progress_panel.set_status(f"Scan failed: {e}")
@@ -326,25 +363,47 @@ class MainWindow(QMainWindow):
         else:
             path = Path(path)
 
+        if self._is_library_root(path):
+            logger.info(
+                "User selected library root in Add Folder; ignoring single-show scan"
+            )
+            QMessageBox.information(
+                self,
+                "Library Root Selected",
+                "This is the configured library root. Use Refresh to rebuild the "
+                "complete library index, or select one individual show folder.",
+            )
+            return
+
+        request_generation = self._invalidate_active_show()
         self.progress_panel.set_status(f"Adding show: {path.name}...")
         self.progress_panel.setVisible(True)
         self.progress_panel.progress_bar.setRange(0, 0)
 
         try:
-            result = await self.pipeline_runner.library_scanner.scan_folder(path)
-            status = ShowStatus.READY if result.episodes else ShowStatus.NO_SUBTITLE
+            resolved = path.expanduser().resolve()
+            scan_output = await self.pipeline_runner.library_scanner.scan_folder(
+                resolved
+            )
+            status = (
+                ShowStatus.READY if scan_output.episodes else ShowStatus.NO_SUBTITLE
+            )
             summary = ShowSummary(
-                name=path.name,
-                path=path,
+                name=resolved.name,
+                path=resolved,
                 status=status,
-                episode_count=len(result.episodes),
+                episode_count=len(scan_output.episodes),
                 processed_count=0,
-                subtitle_text=f"{len(result.episodes)} episodes found",
+                subtitle_text=f"{len(scan_output.episodes)} episodes found",
             )
             self._sidebar.add_show(summary)
             await self._show_index.add_show(summary)
-            self.progress_panel.setVisible(False)
+            if request_generation != self._selection_generation:
+                return
+            self._display_scan_result(summary.name, resolved, scan_output)
         except (AnimeStudioError, OSError) as e:
+            if request_generation != self._selection_generation:
+                return
             logger.error(f"Failed to add folder: {e}")
             self.progress_panel.set_error()
             self.progress_panel.set_status(f"Failed to add folder: {e}")
@@ -352,16 +411,17 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, paths: list[Path]) -> None:
         count = len(paths)
         self.run_button.setText(f"Run {count} selected")
-        self.run_button.setEnabled(count > 0)
+        self.run_button.setEnabled(
+            count > 0
+            and self._current_show_path is not None
+            and self._current_show_name is not None
+            and not self._pipeline_running
+        )
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_run_click(self) -> None:
         """Trigger the forensics pipeline runner asynchronously without blocking the UI thread."""
-        library_path = self.config.library_path or (
-            self._current_show_path.parent
-            if hasattr(self, "_current_show_path")
-            else None
-        )
+        library_path = self.config.library_path
         if not library_path:
             QMessageBox.warning(
                 self,
@@ -370,7 +430,34 @@ class MainWindow(QMainWindow):
             )
             return
 
-        p = Path(library_path)
+        run_generation = self._selection_generation
+        run_show_path = self._current_show_path
+        run_show_name = self._current_show_name
+        run_selected_paths = frozenset(
+            path.expanduser().resolve()
+            for path in self._episode_table.get_selected_paths()
+        )
+
+        if self._pipeline_running:
+            return
+
+        if run_show_path is None or run_show_name is None:
+            QMessageBox.warning(
+                self,
+                "No Show Selected",
+                "Please select a show before running selected episodes.",
+            )
+            return
+
+        if not run_selected_paths:
+            QMessageBox.warning(
+                self,
+                "No Episodes Selected",
+                "Please select at least one episode before running.",
+            )
+            return
+
+        p = Path(library_path).expanduser().resolve()
         if not p.is_dir():
             QMessageBox.critical(
                 self, "Invalid Path", "Selected path is not a valid directory."
@@ -388,40 +475,38 @@ class MainWindow(QMainWindow):
         self.run_button.setEnabled(False)
         self.undo_button.setEnabled(False)
         self.settings_btn.setEnabled(False)
+        self._sidebar.set_navigation_enabled(False)
         self.stop_button.setVisible(True)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("Stop")
         self.results_table.clear_results()
 
-        # Update show status to processing in sidebar/index
-        if hasattr(self, "_current_show_path"):
-            self._sidebar.update_show_status(
-                self._current_show_path, ShowStatus.PROCESSING
-            )
-            await self._show_index.update_status(
-                self._current_show_path, ShowStatus.PROCESSING
-            )
-
-        self.signal_bridge.progress_updated.emit(
-            ProgressState(
-                stage=ProgressStage.SCANNING,
-                status_text="Executing pipeline...",
-            )
-        )
-
         self._stop_event = asyncio.Event()
+        processing_status_persisted = False
 
         try:
-            # Gather selected paths from EpisodeTableWidget
-            selected = self._episode_table.get_selected_paths()
+            # The first await after locking the UI must remain inside this
+            # guarded lifecycle so every expected failure reaches cleanup.
+            await self._show_index.update_status(run_show_path, ShowStatus.PROCESSING)
+            processing_status_persisted = True
+            self._sidebar.update_show_status(run_show_path, ShowStatus.PROCESSING)
+
+            self.signal_bridge.progress_updated.emit(
+                ProgressState(
+                    stage=ProgressStage.SCANNING,
+                    status_text="Executing pipeline...",
+                )
+            )
 
             config = PipelineConfig(
                 library_path=p,
+                discovery_root=run_show_path,
                 dry_run=self.config.dry_run
                 if hasattr(self.config, "dry_run")
                 else False,
                 sync_enabled=True,
-                selected_paths=frozenset(selected) if selected else None,
+                anime_title=run_show_name,
+                selected_paths=run_selected_paths,
             )
 
             report = await self.pipeline_runner.run(
@@ -436,23 +521,26 @@ class MainWindow(QMainWindow):
 
             # Update statuses on completion
             final_status = ShowStatus.ALL_DONE
+            is_current_run_show = (
+                run_generation == self._selection_generation
+                and run_show_path == self._current_show_path
+                and run_show_name == self._current_show_name
+            )
             for ep_res in run_result.episodes:
                 status_str = (
                     ep_res.status.value
                     if hasattr(ep_res.status, "value")
                     else str(ep_res.status)
                 )
-                self._episode_table.update_episode_status(
-                    ep_res.episode_path, status_str
-                )
+                if is_current_run_show:
+                    self._episode_table.update_episode_status(
+                        ep_res.episode_path, status_str
+                    )
                 if status_str.lower() in ("failed", "error"):
                     final_status = ShowStatus.WARNING
 
-            if hasattr(self, "_current_show_path"):
-                self._sidebar.update_show_status(self._current_show_path, final_status)
-                await self._show_index.update_status(
-                    self._current_show_path, final_status
-                )
+            self._sidebar.update_show_status(run_show_path, final_status)
+            await self._show_index.update_status(run_show_path, final_status)
 
             if self._stop_event.is_set():
                 self.signal_bridge.progress_updated.emit(
@@ -478,13 +566,9 @@ class MainWindow(QMainWindow):
             )
             self.signal_bridge.pipeline_error.emit(str(e))
 
-            if hasattr(self, "_current_show_path"):
-                self._sidebar.update_show_status(
-                    self._current_show_path, ShowStatus.WARNING
-                )
-                await self._show_index.update_status(
-                    self._current_show_path, ShowStatus.WARNING
-                )
+            if processing_status_persisted:
+                self._sidebar.update_show_status(run_show_path, ShowStatus.WARNING)
+                await self._show_index.update_status(run_show_path, ShowStatus.WARNING)
 
             from src.gui.messages import ErrorInfo
             from src.gui.widgets.error_dialog import show_error_dialog
@@ -500,9 +584,10 @@ class MainWindow(QMainWindow):
             self._pipeline_running = False
             self._stop_event = None
             self.stop_button.setVisible(False)
-            self.run_button.setEnabled(True)
             self.undo_button.setEnabled(True)
             self.settings_btn.setEnabled(True)
+            self._sidebar.set_navigation_enabled(not self._is_refreshing)
+            self._on_selection_changed(self._episode_table.get_selected_paths())
 
     def _on_stop_click(self) -> None:
         """Handle Stop button click by setting the stop event."""
@@ -518,7 +603,7 @@ class MainWindow(QMainWindow):
             return
         library_path = self.config.library_path or (
             self._current_show_path.parent
-            if hasattr(self, "_current_show_path")
+            if self._current_show_path is not None
             else None
         )
         if not library_path:

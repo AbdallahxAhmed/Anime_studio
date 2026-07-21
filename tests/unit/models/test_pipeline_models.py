@@ -57,6 +57,7 @@ def test_pipeline_config_valid():
         sync_enabled=False,
     )
     assert cfg.library_path == Path("/anime")
+    assert cfg.discovery_root is None
     assert cfg.dry_run is True
     assert cfg.sync_enabled is False
 
@@ -147,9 +148,11 @@ def test_sub_folder_node_and_show_node():
 def test_pipeline_config_selected_paths():
     cfg = PipelineConfig(
         library_path=Path("/anime"),
-        selected_paths=frozenset({Path("/anime/Season 1")}),
+        discovery_root=Path("/anime/Show A"),
+        selected_paths=frozenset({Path("/anime/Show A/episode_01.mkv")}),
     )
-    assert cfg.selected_paths == frozenset({Path("/anime/Season 1")})
+    assert cfg.discovery_root == Path("/anime/Show A")
+    assert cfg.selected_paths == frozenset({Path("/anime/Show A/episode_01.mkv")})
 
     # Default is None
     cfg_default = PipelineConfig(library_path=Path("/anime"))

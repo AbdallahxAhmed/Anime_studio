@@ -52,9 +52,8 @@ class ShowSidebarWidget(QWidget):
         self._add_btn.clicked.connect(self._on_add_clicked)
         btn_layout.addWidget(self._add_btn)
 
-        self._refresh_btn = QPushButton("↻", self)
+        self._refresh_btn = QPushButton("↻ Refresh", self)
         self._refresh_btn.setToolTip("Refresh Library Index (Full Rescan)")
-        self._refresh_btn.setFixedWidth(32)
         self._refresh_btn.clicked.connect(self._on_refresh_clicked)
         btn_layout.addWidget(self._refresh_btn)
 
@@ -62,6 +61,12 @@ class ShowSidebarWidget(QWidget):
 
     def set_refresh_enabled(self, enabled: bool) -> None:
         """Enable or disable the refresh button."""
+        self._refresh_btn.setEnabled(enabled)
+
+    def set_navigation_enabled(self, enabled: bool) -> None:
+        """Enable or disable controls that can change the active show."""
+        self._list_widget.setEnabled(enabled)
+        self._add_btn.setEnabled(enabled)
         self._refresh_btn.setEnabled(enabled)
 
     def is_refresh_enabled(self) -> bool:

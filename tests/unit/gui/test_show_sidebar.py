@@ -130,3 +130,22 @@ def test_sidebar_empty_populate() -> None:
     sidebar = ShowSidebarWidget(signal_bridge=bridge)
     sidebar.populate([])
     assert sidebar._list_widget.count() == 0
+
+
+def test_sidebar_refresh_button_discoverability(mocker) -> None:
+    """Task 3: Refresh button has visible text 'Refresh', tooltip, and emits refresh_requested."""
+    bridge = SignalBridge()
+    sidebar = ShowSidebarWidget(signal_bridge=bridge)
+
+    assert sidebar._refresh_btn.text() == "↻ Refresh"
+    assert sidebar._refresh_btn.toolTip() == "Refresh Library Index (Full Rescan)"
+
+    mock_slot = mocker.Mock()
+    sidebar.refresh_requested.connect(mock_slot)
+
+    sidebar._refresh_btn.click()
+    mock_slot.assert_called_once()
+
+    sidebar.set_refresh_enabled(False)
+    sidebar._refresh_btn.click()
+    mock_slot.assert_called_once()

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from os.path import normcase
 import time
 from typing import Any, Literal
 from pathlib import Path
@@ -31,6 +32,11 @@ def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _normalized_path_key(path: Path) -> str:
+    """Return a resolved, platform-normalized key for exact path identity."""
+    return normcase(str(Path(path).expanduser().resolve()))
 
 
 class PipelineRunner:
@@ -65,6 +71,15 @@ class PipelineRunner:
         """Run the full library pipeline: scan, repair, resolve fonts, timing sync, plan mux, dispatch mux, trash, report."""
         start_time = time.perf_counter()
         run_timestamp = datetime.now(timezone.utc)
+        effective_discovery_root = (
+            Path(
+                pipeline_config.discovery_root
+                if pipeline_config.discovery_root is not None
+                else pipeline_config.library_path
+            )
+            .expanduser()
+            .resolve()
+        )
 
         # 1. Scan Library
         logger.info(
@@ -73,7 +88,7 @@ class PipelineRunner:
             progress_current=None,
             progress_total=None,
         )
-        scan_output = await self.library_scanner.scan(pipeline_config.library_path)
+        scan_output = await self.library_scanner.scan(effective_discovery_root)
         scan_results = scan_output.episodes
 
         completed_from_checkpoint = set()
@@ -97,21 +112,20 @@ class PipelineRunner:
             ]
 
         if pipeline_config.selected_paths is not None:
-            selected = pipeline_config.selected_paths
+            selected_keys = {
+                _normalized_path_key(path) for path in pipeline_config.selected_paths
+            }
             original_count = len(scan_results)
             scan_results = [
                 ep
                 for ep in scan_results
-                if (
-                    ep.episode_path.parent in selected
-                    or ep.episode_path.parent.parent in selected
-                )
+                if _normalized_path_key(ep.episode_path) in selected_keys
             ]
             logger.info(
                 "Filtered episodes by selected paths",
                 selected_count=len(scan_results),
                 total_count=original_count,
-                selected_paths_count=len(selected),
+                selected_paths_count=len(selected_keys),
             )
 
         font_dirs = scan_output.font_directories
@@ -138,7 +152,7 @@ class PipelineRunner:
             if scan_results:
                 anime_title = scan_results[0].anime_title
             else:
-                anime_title = Path(pipeline_config.library_path).name or "Unknown"
+                anime_title = effective_discovery_root.name or "Unknown"
 
         if not scan_results:
             logger.info("no episodes found during scan")
@@ -158,7 +172,7 @@ class PipelineRunner:
 
         # Find skipped episodes (MKVs without matching ASS)
         all_mkvs = sorted(
-            list(Path(pipeline_config.library_path).rglob("*.mkv")),
+            list(effective_discovery_root.rglob("*.mkv")),
             key=lambda p: p.name,
         )
         scanned_mkv_paths = {Path(s.episode_path).resolve() for s in scan_results}

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -308,7 +309,7 @@ async def test_pipeline_runner_respects_selected_paths(
     ):
         cfg = PipelineConfig(
             library_path=Path("/anime"),
-            selected_paths=frozenset({Path("/anime/Show A")}),
+            selected_paths=frozenset({Path("/anime/Show A/episode_01.mkv")}),
         )
         report = await runner.run(cfg)
 
@@ -316,6 +317,240 @@ async def test_pipeline_runner_respects_selected_paths(
         processed = [e for e in report.episodes if e.status != EpisodeStatus.SKIPPED]
         assert len(processed) == 1
         assert processed[0].episode_path == Path("/anime/Show A/episode_01.mkv")
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_scopes_discovery_and_skipped_accounting(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    library_root = tmp_path / "Anime"
+    show_a = library_root / "ShowA"
+    show_b = library_root / "ShowB"
+    show_a.mkdir(parents=True)
+    show_b.mkdir()
+    selected_mkv = show_a / "episode_01.mkv"
+    selected_ass = show_a / "episode_01.ass"
+    unselected_mkv = show_a / "episode_02.mkv"
+    unselected_ass = show_a / "episode_02.ass"
+    duplicate_mkv = show_b / "episode_01.mkv"
+    for path in (
+        selected_mkv,
+        selected_ass,
+        unselected_mkv,
+        unselected_ass,
+        duplicate_mkv,
+    ):
+        path.touch()
+
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(
+            episodes=[
+                LibraryScanResult(
+                    episode_path=selected_mkv,
+                    subtitle_path=selected_ass,
+                    anime_title="Show A",
+                ),
+                LibraryScanResult(
+                    episode_path=unselected_mkv,
+                    subtitle_path=unselected_ass,
+                    anime_title="Show A",
+                ),
+                LibraryScanResult(
+                    episode_path=duplicate_mkv,
+                    subtitle_path=None,
+                    anime_title="Show B",
+                ),
+            ],
+            font_directories=[],
+        )
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    with patch(
+        "src.core.pipeline_runner.repair_ass",
+        MagicMock(
+            return_value="[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial"
+        ),
+    ):
+        report = await runner.run(
+            PipelineConfig(
+                library_path=library_root,
+                discovery_root=show_a,
+                anime_title="Show A Display Name",
+                dry_run=True,
+                selected_paths=frozenset({selected_mkv}),
+            )
+        )
+
+    mock_scanner.scan.assert_awaited_once_with(show_a.resolve())
+    assert report.anime_title == "Show A Display Name"
+    assert {episode.episode_path for episode in report.episodes} == {
+        selected_mkv.resolve(),
+        unselected_mkv.resolve(),
+    }
+    assert duplicate_mkv.resolve() not in {
+        episode.episode_path for episode in report.episodes
+    }
+    assert mock_filesystem.write_file_atomic.await_args.args[0] == (
+        library_root / "_AnimeStudio_Report.md"
+    )
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_empty_selected_paths_produces_empty_scoped_report(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    library_root = tmp_path / "Anime"
+    discovery_root = library_root / "Ranma"
+    discovery_root.mkdir(parents=True)
+    scan_result = LibraryScanResult(
+        episode_path=discovery_root / "episode_01.mkv",
+        subtitle_path=discovery_root / "episode_01.ass",
+        anime_title="Ranma",
+    )
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=[scan_result], font_directories=[])
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    report = await runner.run(
+        PipelineConfig(
+            library_path=library_root,
+            discovery_root=discovery_root,
+            anime_title="Ranma Display Name",
+            selected_paths=frozenset(),
+        )
+    )
+
+    assert report.episodes == []
+    assert report.anime_title == "Ranma Display Name"
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_uses_library_root_without_discovery_root(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    library_root = tmp_path / "Anime"
+    library_root.mkdir()
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(episodes=[], font_directories=[])
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    report = await runner.run(PipelineConfig(library_path=library_root))
+
+    mock_scanner.scan.assert_awaited_once_with(library_root.resolve())
+    assert report.anime_title == "Anime"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path identity behavior")
+@pytest.mark.anyio
+async def test_pipeline_runner_matches_case_equivalent_windows_selected_path(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    library_root = tmp_path / "Anime"
+    show_root = library_root / "ShowA"
+    show_root.mkdir(parents=True)
+    episode_path = show_root / "episode_01.mkv"
+    subtitle_path = show_root / "episode_01.ass"
+    episode_path.touch()
+    subtitle_path.touch()
+    mock_scanner = _make_mock_scanner(
+        LibraryScanOutput(
+            episodes=[
+                LibraryScanResult(
+                    episode_path=episode_path,
+                    subtitle_path=subtitle_path,
+                    anime_title="Show A",
+                )
+            ],
+            font_directories=[],
+        )
+    )
+    runner = PipelineRunner(
+        font_resolver=mock_font_resolver,
+        subprocess_adapter=mock_subprocess,
+        filesystem=mock_filesystem,
+        tool_registry=mock_tool_registry,
+        config=app_config,
+        font_ingestion_service=mock_font_ingestion_service,
+        disk_semaphore=disk_semaphore,
+        library_scanner=mock_scanner,
+    )
+
+    with patch(
+        "src.core.pipeline_runner.repair_ass",
+        MagicMock(
+            return_value="[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial"
+        ),
+    ):
+        report = await runner.run(
+            PipelineConfig(
+                library_path=library_root,
+                discovery_root=show_root,
+                dry_run=True,
+                selected_paths=frozenset({Path(str(episode_path).upper())}),
+            )
+        )
+
+    assert [episode.episode_path for episode in report.episodes] == [
+        episode_path.resolve()
+    ]
 
 
 @pytest.mark.anyio
