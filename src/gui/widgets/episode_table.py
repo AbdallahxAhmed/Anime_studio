@@ -1,30 +1,35 @@
 from pathlib import Path
 from typing import Any
+
 from PySide6.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    QSize,
     Qt,
     Signal,
-    QModelIndex,
-    QPersistentModelIndex,
-    QAbstractTableModel,
-    QSize,
 )
-from PySide6.QtGui import QPainter, QColor
+from PySide6.QtGui import QColor, QKeyEvent, QKeySequence, QPainter
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QTableView,
     QHeaderView,
+    QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
-    QStyle,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
+
+from src.gui.theme import TOKENS, canonical_status, status_color, status_label
 from src.models.pipeline import LibraryScanResult
 
 
 class EpisodeTableModel(QAbstractTableModel):
     """Model for episode selection and processing status."""
 
-    COLUMNS = ["", "Episode", "Subtitle", "Status"]
+    COLUMNS = ["Select", "Episode", "Subtitle", "Status"]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -37,20 +42,17 @@ class EpisodeTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._episodes = episodes
         self._selected = [True] * len(episodes)
-        self._statuses = []
-        for ep in episodes:
-            if ep.subtitle_path:
-                self._statuses.append("pending")
-            else:
-                self._statuses.append("skipped")
+        self._statuses = [
+            "pending" if episode.subtitle_path else "skipped" for episode in episodes
+        ]
         self.endResetModel()
 
     def get_selected_paths(self) -> list[Path]:
         """Return the paths of all selected episodes."""
         return [
-            self._episodes[i].episode_path
-            for i, sel in enumerate(self._selected)
-            if sel
+            self._episodes[index].episode_path
+            for index, selected in enumerate(self._selected)
+            if selected
         ]
 
     def set_all_checked(self, checked: bool) -> None:
@@ -72,7 +74,7 @@ class EpisodeTableModel(QAbstractTableModel):
     def columnCount(
         self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()
     ) -> int:
-        return 4
+        return len(self.COLUMNS)
 
     def data(
         self,
@@ -83,40 +85,80 @@ class EpisodeTableModel(QAbstractTableModel):
             return None
 
         row = index.row()
-        col = index.column()
-        ep = self._episodes[row]
+        column = index.column()
+        episode = self._episodes[row]
+        episode_path = str(episode.episode_path)
 
-        if col == 0:
+        if column == 0:
             if role == Qt.ItemDataRole.CheckStateRole:
                 return (
                     Qt.CheckState.Checked
                     if self._selected[row]
                     else Qt.CheckState.Unchecked
                 )
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return f"Select episode: {episode_path}"
+            if role == Qt.ItemDataRole.AccessibleTextRole:
+                return f"Select {episode.episode_path.name}"
+            if role == Qt.ItemDataRole.AccessibleDescriptionRole:
+                return episode_path
             return None
 
-        elif col == 1:
+        if column == 1:
             if role == Qt.ItemDataRole.DisplayRole:
-                return ep.episode_path.name
+                return episode.episode_path.name
+            if role in {
+                Qt.ItemDataRole.ToolTipRole,
+                Qt.ItemDataRole.AccessibleDescriptionRole,
+            }:
+                return episode_path
+            if role == Qt.ItemDataRole.AccessibleTextRole:
+                return f"Episode {episode.episode_path.name}"
             return None
 
-        elif col == 2:
+        if column == 2:
+            subtitle_text = self._subtitle_text(episode)
             if role == Qt.ItemDataRole.DisplayRole:
-                if ep.subtitle_path:
-                    return ep.subtitle_path.name
-                elif ep.embedded_sub_info and ep.embedded_sub_info.tracks:
-                    langs = ep.embedded_sub_info.languages
-                    lang_str = f" ({', '.join(langs)})" if langs else ""
-                    return f"Embedded{lang_str}"
-                return "None"
+                return subtitle_text
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return (
+                    str(episode.subtitle_path)
+                    if episode.subtitle_path
+                    else subtitle_text
+                )
+            if role == Qt.ItemDataRole.AccessibleTextRole:
+                return f"Subtitle: {subtitle_text}"
+            if role == Qt.ItemDataRole.AccessibleDescriptionRole:
+                return (
+                    str(episode.subtitle_path)
+                    if episode.subtitle_path
+                    else subtitle_text
+                )
             return None
 
-        elif col == 3:
+        if column == 3:
+            readable_status = status_label(self._statuses[row])
             if role == Qt.ItemDataRole.DisplayRole:
-                return self._statuses[row]
+                return readable_status
+            if role in {
+                Qt.ItemDataRole.ToolTipRole,
+                Qt.ItemDataRole.AccessibleTextRole,
+                Qt.ItemDataRole.AccessibleDescriptionRole,
+            }:
+                return f"Episode status: {readable_status}"
             return None
 
         return None
+
+    @staticmethod
+    def _subtitle_text(episode: LibraryScanResult) -> str:
+        if episode.subtitle_path:
+            return episode.subtitle_path.name
+        if episode.embedded_sub_info and episode.embedded_sub_info.tracks:
+            languages = episode.embedded_sub_info.languages
+            language_suffix = f" ({', '.join(languages)})" if languages else ""
+            return f"Embedded{language_suffix}"
+        return "None"
 
     def setData(
         self,
@@ -155,32 +197,36 @@ class EpisodeTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> Any:
-        if (
-            orientation == Qt.Orientation.Horizontal
-            and role == Qt.ItemDataRole.DisplayRole
-        ):
+        if orientation != Qt.Orientation.Horizontal:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
             return self.COLUMNS[section]
+        if section == 0 and role == Qt.ItemDataRole.ToolTipRole:
+            return "Select or deselect all episodes"
+        if section == 0 and role == Qt.ItemDataRole.AccessibleTextRole:
+            return "Select all episodes"
         return None
 
     def update_status(self, path: Path, status: str) -> None:
-        """Update status for a specific episode path."""
-        for i, ep in enumerate(self._episodes):
-            if ep.episode_path == path:
-                self._statuses[i] = status
-                idx = self.index(i, 3)
-                self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DisplayRole])
+        """Update status for a specific full episode path."""
+        for index, episode in enumerate(self._episodes):
+            if episode.episode_path == path:
+                self._statuses[index] = canonical_status(status)
+                model_index = self.index(index, 3)
+                self.dataChanged.emit(
+                    model_index,
+                    model_index,
+                    [
+                        Qt.ItemDataRole.DisplayRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                        Qt.ItemDataRole.AccessibleTextRole,
+                    ],
+                )
                 break
 
 
 class StatusBadgeDelegate(QStyledItemDelegate):
-    """Custom delegate for status badge styling."""
-
-    COLORS = {
-        "muxed": QColor("#7ED321"),
-        "pending": QColor("#F5A623"),
-        "skipped": QColor("#888888"),
-        "error": QColor("#E8572A"),
-    }
+    """Custom delegate for semantic, textual status badges."""
 
     def paint(
         self,
@@ -192,72 +238,92 @@ class StatusBadgeDelegate(QStyledItemDelegate):
             super().paint(painter, option, index)
             return
 
-        status = str(index.data(Qt.ItemDataRole.DisplayRole) or "").lower()
-        bg_color = self.COLORS.get(status, QColor("#888888"))
+        status = canonical_status(str(index.data(Qt.ItemDataRole.DisplayRole) or ""))
+        background_color = QColor(status_color(status))
+        label = status_label(status)
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Draw default background (selection highlight)
         if option.state & QStyle.StateFlag.State_Selected:  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits state from QStyleOption
             painter.fillRect(option.rect, option.palette.highlight())  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits rect/palette from QStyleOption
 
-        rect = option.rect.adjusted(6, 6, -6, -6)  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits rect from QStyleOption
-        painter.setBrush(bg_color)
+        badge_rect = option.rect.adjusted(  # type: ignore[attr-defined]  # PySide6 QStyleOptionViewItem inherits rect from QStyleOption
+            TOKENS.spacing_4,
+            TOKENS.spacing_4,
+            -TOKENS.spacing_4,
+            -TOKENS.spacing_4,
+        )
+        painter.setBrush(background_color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect, 4, 4)
+        painter.drawRoundedRect(badge_rect, TOKENS.radius_small, TOKENS.radius_small)
 
         font = painter.font()
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor("#FFFFFF"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, status.capitalize())
-
+        painter.setPen(QColor(TOKENS.text_on_accent))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
 
     def sizeHint(
         self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
     ) -> QSize:
-        return QSize(100, 36)
+        return QSize(TOKENS.status_column_width, TOKENS.table_row_height)
 
 
 class EpisodeTableWidget(QWidget):
-    """Widget wrapper around QTableView containing EpisodeTableModel."""
+    """Episode selection table with keyboard controls and textual status badges."""
 
     selection_changed = Signal(list)  # list[Path]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setAccessibleName("Episode selection")
+        self.setAccessibleDescription(
+            "Select the episodes to run, review subtitle availability, and track status."
+        )
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._table = QTableView(self)
+        self._table.setAccessibleName("Episodes")
+        self._table.setAccessibleDescription(
+            "Episode rows. Use Space to select a row and Control+A to select all."
+        )
+        self._table.setToolTip("Select episodes to include in the next run")
+        self._table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._model = EpisodeTableModel(self)
         self._table.setModel(self._model)
 
         self._table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
         self._table.setShowGrid(False)
+        self._table.verticalHeader().setDefaultSectionSize(TOKENS.table_row_height)
 
-        # Badge delegate
         self._table.setItemDelegateForColumn(3, StatusBadgeDelegate(self))
 
-        # Horizontal header setup
         header = self._table.horizontalHeader()
+        header.setAccessibleName("Episode columns")
+        header.setAccessibleDescription(
+            "Select all episodes from the Select column header."
+        )
+        header.setToolTip("Click Select to select or deselect all episodes")
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
 
-        self._table.setColumnWidth(0, 30)
+        self._table.setColumnWidth(0, TOKENS.select_column_width)
         self._table.setColumnWidth(2, 180)
-        self._table.setColumnWidth(3, 100)
+        self._table.setColumnWidth(3, TOKENS.status_column_width)
 
         layout.addWidget(self._table)
 
-        # Wire data changes to selection emission
         self._model.dataChanged.connect(self._on_selection_updated)
         header.sectionClicked.connect(self._on_header_clicked)
+        self._table.installEventFilter(self)
         self._all_selected = True
 
     def populate(self, episodes: list[LibraryScanResult]) -> None:
@@ -271,7 +337,7 @@ class EpisodeTableWidget(QWidget):
         return self._model.get_selected_paths()
 
     def update_episode_status(self, path: Path, status: str) -> None:
-        """Update dynamic status of an episode by its path."""
+        """Update dynamic status of an episode by its full path."""
         self._model.update_status(path, status)
 
     def set_all_checked(self, checked: bool) -> None:
@@ -279,11 +345,23 @@ class EpisodeTableWidget(QWidget):
         self._model.set_all_checked(checked)
         self._all_selected = checked
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Make Control+A select episode checkboxes rather than only table cells."""
+        if (
+            watched is self._table
+            and event.type() == QEvent.Type.KeyPress
+            and isinstance(event, QKeyEvent)
+            and event.matches(QKeySequence.StandardKey.SelectAll)
+        ):
+            self.set_all_checked(True)
+            return True
+        return super().eventFilter(watched, event)
+
     def _on_header_checkbox_clicked(self, checked: bool) -> None:
         self.set_all_checked(checked)
 
-    def _on_header_clicked(self, logicalIndex: int) -> None:
-        if logicalIndex == 0:
+    def _on_header_clicked(self, logical_index: int) -> None:
+        if logical_index == 0:
             self._on_header_checkbox_clicked(not self._all_selected)
 
     def _on_selection_updated(self, *_args: object) -> None:

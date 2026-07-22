@@ -1,4 +1,5 @@
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from src.gui.widgets.activity_feed import ActivityFeedWidget
 
@@ -114,3 +115,32 @@ def test_activity_feed_update_summary() -> None:
     feed = ActivityFeedWidget()
     feed.update_summary("Last event message")
     assert feed.summary_label.text() == "Last event message"
+
+
+def test_activity_feed_keyboard_toggle_and_accessibility(qtbot) -> None:
+    """The visible activity action works by keyboard and announces its state."""
+    feed = ActivityFeedWidget()
+    qtbot.addWidget(feed)
+    feed.show()
+    feed.toggle_button.setFocus()
+
+    assert feed.toggle_button.text() == "▶ Activity Log"
+    assert feed.toggle_button.accessibleName() == "Show activity log"
+    qtbot.keyClick(feed.toggle_button, Qt.Key.Key_Space)
+    assert feed._is_collapsed is False
+    assert feed.toggle_button.text() == "▼ Activity Log"
+    assert feed.toggle_button.accessibleName() == "Hide activity log"
+
+
+def test_activity_feed_preserves_full_long_summary_in_assistive_text(qtbot) -> None:
+    """Long multilingual summaries elide visually but retain the full tooltip."""
+    feed = ActivityFeedWidget()
+    qtbot.addWidget(feed)
+    feed.resize(300, 36)
+    feed.show()
+    summary = "Long activity 日本語 العربية " * 20
+
+    feed.update_summary(summary)
+
+    assert feed.summary_label.toolTip() == summary
+    assert feed.summary_label.accessibleDescription() == summary

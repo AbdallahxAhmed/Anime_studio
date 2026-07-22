@@ -1,9 +1,11 @@
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtGui import QColor
 from src.models.pipeline import LibraryScanResult
+from src.gui.theme import TOKENS
 from src.gui.widgets.episode_table import EpisodeTableWidget, StatusBadgeDelegate
 
 
@@ -42,8 +44,8 @@ def test_table_populate() -> None:
     assert table._model.rowCount() == 2
 
     # Check status
-    assert table._model.data(table._model.index(0, 3)) == "pending"
-    assert table._model.data(table._model.index(1, 3)) == "skipped"
+    assert table._model.data(table._model.index(0, 3)) == "Pending"
+    assert table._model.data(table._model.index(1, 3)) == "Skipped"
 
 
 def test_table_get_selected_paths_empty() -> None:
@@ -71,7 +73,7 @@ def test_table_set_all_checked() -> None:
     assert len(table.get_selected_paths()) == 2
 
 
-def test_table_selection_changed_signal(mocker) -> None:
+def test_table_selection_changed_signal() -> None:
     """5. selection_changed signal emits when checkbox toggled."""
     table = EpisodeTableWidget()
     episodes = [
@@ -79,8 +81,8 @@ def test_table_selection_changed_signal(mocker) -> None:
     ]
     table.populate(episodes)
 
-    mock_slot = mocker.Mock()
-    table.selection_changed.connect(mock_slot)
+    emissions: list[list[Path]] = []
+    table.selection_changed.connect(emissions.append)
 
     # Toggle checkbox on first row
     table._model.setData(
@@ -89,20 +91,20 @@ def test_table_selection_changed_signal(mocker) -> None:
         Qt.ItemDataRole.CheckStateRole,
     )
 
-    mock_slot.assert_called_with([])
+    assert emissions == [[]]
 
 
-def test_table_badge_pending_color(mocker) -> None:
+def test_table_badge_pending_color() -> None:
     """6. Status 'pending' row shows amber in delegate (mock QPainter)."""
     delegate = StatusBadgeDelegate()
 
     # Mock model index returning "pending"
-    mock_index = mocker.MagicMock(spec=QModelIndex)
+    mock_index = MagicMock(spec=QModelIndex)
     mock_index.column.return_value = 3
     mock_index.data.return_value = "pending"
 
-    mock_painter = mocker.MagicMock()
-    mock_font = mocker.MagicMock()
+    mock_painter = MagicMock()
+    mock_font = MagicMock()
     mock_painter.font.return_value = mock_font
 
     option = QStyleOptionViewItem()
@@ -110,23 +112,23 @@ def test_table_badge_pending_color(mocker) -> None:
 
     delegate.paint(mock_painter, option, mock_index)
 
-    # Verify setBrush was called with the color #f5a623 (case-insensitive check)
+    # Verify setBrush uses the centralized semantic warning color.
     mock_painter.setBrush.assert_called_once()
     called_color = mock_painter.setBrush.call_args[0][0]
-    assert called_color == QColor("#F5A623")
+    assert called_color == QColor(TOKENS.warning)
 
 
-def test_table_badge_skipped_color(mocker) -> None:
+def test_table_badge_skipped_color() -> None:
     """7. Status 'skipped' row shows gray."""
     delegate = StatusBadgeDelegate()
 
     # Mock model index returning "skipped"
-    mock_index = mocker.MagicMock(spec=QModelIndex)
+    mock_index = MagicMock(spec=QModelIndex)
     mock_index.column.return_value = 3
     mock_index.data.return_value = "skipped"
 
-    mock_painter = mocker.MagicMock()
-    mock_font = mocker.MagicMock()
+    mock_painter = MagicMock()
+    mock_font = MagicMock()
     mock_painter.font.return_value = mock_font
 
     option = QStyleOptionViewItem()
@@ -136,7 +138,7 @@ def test_table_badge_skipped_color(mocker) -> None:
 
     mock_painter.setBrush.assert_called_once()
     called_color = mock_painter.setBrush.call_args[0][0]
-    assert called_color == QColor("#888888")
+    assert called_color == QColor(TOKENS.stopped)
 
 
 def test_table_update_episode_status(tmp_path: Path) -> None:
@@ -151,8 +153,8 @@ def test_table_update_episode_status(tmp_path: Path) -> None:
     table.populate(episodes)
 
     table.update_episode_status(path1, "muxed")
-    assert table._model.data(table._model.index(0, 3)) == "muxed"
-    assert table._model.data(table._model.index(1, 3)) == "skipped"  # Unchanged
+    assert table._model.data(table._model.index(0, 3)) == "Complete"
+    assert table._model.data(table._model.index(1, 3)) == "Skipped"  # Unchanged
 
 
 def test_table_update_status_same_filename_different_directories(
@@ -181,25 +183,25 @@ def test_table_update_status_same_filename_different_directories(
     table.update_episode_status(path_s2, "complete")
 
     # Season 1 episode01.mkv must remain pending, Season 2 episode01.mkv updated
-    assert table._model.data(table._model.index(0, 3)) == "pending"
-    assert table._model.data(table._model.index(1, 3)) == "complete"
+    assert table._model.data(table._model.index(0, 3)) == "Pending"
+    assert table._model.data(table._model.index(1, 3)) == "Complete"
 
 
-def test_table_populate_zero_episodes_selection_state(mocker) -> None:
+def test_table_populate_zero_episodes_selection_state() -> None:
     """Task 1: Population with zero episodes produces zero selected paths."""
     table = EpisodeTableWidget()
-    mock_slot = mocker.Mock()
-    table.selection_changed.connect(mock_slot)
+    emissions: list[list[Path]] = []
+    table.selection_changed.connect(emissions.append)
     table.populate([])
     assert table.get_selected_paths() == []
-    mock_slot.assert_called_once_with([])
+    assert emissions == [[]]
 
 
-def test_table_populate_n_episodes_selection_state_synchronized(mocker) -> None:
+def test_table_populate_n_episodes_selection_state_synchronized() -> None:
     """Task 1: Population with N episodes synchronizes checkboxes, selected paths, and emitted count."""
     table = EpisodeTableWidget()
-    mock_slot = mocker.Mock()
-    table.selection_changed.connect(mock_slot)
+    emissions: list[list[Path]] = []
+    table.selection_changed.connect(emissions.append)
 
     episodes = [
         LibraryScanResult(episode_path=Path("ep1.mkv"), anime_title="Show"),
@@ -214,10 +216,10 @@ def test_table_populate_n_episodes_selection_state_synchronized(mocker) -> None:
     assert selected == [Path("ep1.mkv"), Path("ep2.mkv"), Path("ep3.mkv")]
 
     # Check emission during populate
-    mock_slot.assert_called_with(selected)
+    assert emissions[-1] == selected
 
 
-def test_table_select_single_and_multiple_rows(mocker) -> None:
+def test_table_select_single_and_multiple_rows() -> None:
     """Task 1: Selecting 1 row or multiple rows emits exact count."""
     table = EpisodeTableWidget()
     episodes = [
@@ -226,8 +228,8 @@ def test_table_select_single_and_multiple_rows(mocker) -> None:
     ]
     table.populate(episodes)
 
-    mock_slot = mocker.Mock()
-    table.selection_changed.connect(mock_slot)
+    emissions: list[list[Path]] = []
+    table.selection_changed.connect(emissions.append)
 
     # Uncheck all, then check row 0
     table.set_all_checked(False)
@@ -239,7 +241,7 @@ def test_table_select_single_and_multiple_rows(mocker) -> None:
         Qt.ItemDataRole.CheckStateRole,
     )
     assert table.get_selected_paths() == [Path("ep1.mkv")]
-    mock_slot.assert_called_with([Path("ep1.mkv")])
+    assert emissions[-1] == [Path("ep1.mkv")]
 
     table._model.setData(
         table._model.index(1, 0),
@@ -247,10 +249,10 @@ def test_table_select_single_and_multiple_rows(mocker) -> None:
         Qt.ItemDataRole.CheckStateRole,
     )
     assert table.get_selected_paths() == [Path("ep1.mkv"), Path("ep2.mkv")]
-    mock_slot.assert_called_with([Path("ep1.mkv"), Path("ep2.mkv")])
+    assert emissions[-1] == [Path("ep1.mkv"), Path("ep2.mkv")]
 
 
-def test_table_repopulate_resets_selection_count(mocker) -> None:
+def test_table_repopulate_resets_selection_count() -> None:
     """Task 1: Re-populating table with another show resets selection count correctly."""
     table = EpisodeTableWidget()
     table.populate(
@@ -269,3 +271,47 @@ def test_table_repopulate_resets_selection_count(mocker) -> None:
     )
     assert len(table.get_selected_paths()) == 1
     assert table.get_selected_paths() == [Path("showB_ep1.mkv")]
+
+
+def test_table_accessibility_and_keyboard_select_all(qtbot) -> None:
+    """The table exposes selection semantics and Control+A selects every row."""
+    table = EpisodeTableWidget()
+    qtbot.addWidget(table)
+    table.populate(
+        [
+            LibraryScanResult(episode_path=Path("episode-1.mkv"), anime_title="Show"),
+            LibraryScanResult(episode_path=Path("episode-2.mkv"), anime_title="Show"),
+        ]
+    )
+    table.set_all_checked(False)
+    table.show()
+    table._table.setFocus()
+
+    assert table._table.accessibleName() == "Episodes"
+    assert (
+        table._model.data(table._model.index(0, 0), Qt.ItemDataRole.AccessibleTextRole)
+        == "Select episode-1.mkv"
+    )
+    qtbot.keyClick(
+        table._table,
+        Qt.Key.Key_A,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    assert table.get_selected_paths() == [Path("episode-1.mkv"), Path("episode-2.mkv")]
+
+    table._table.setCurrentIndex(table._model.index(0, 0))
+    qtbot.keyClick(table._table, Qt.Key.Key_Space)
+    assert table.get_selected_paths() == [Path("episode-2.mkv")]
+
+
+def test_table_full_paths_remain_available_for_long_names(tmp_path: Path) -> None:
+    """Elided table cells retain full path information for assistive technology."""
+    table = EpisodeTableWidget()
+    long_path = tmp_path / ("very-long-episode-name-日本語-العربية-" * 4 + ".mkv")
+    table.populate([LibraryScanResult(episode_path=long_path, anime_title="Show")])
+
+    index = table._model.index(0, 1)
+    assert table._model.data(index, Qt.ItemDataRole.ToolTipRole) == str(long_path)
+    assert table._model.data(index, Qt.ItemDataRole.AccessibleDescriptionRole) == str(
+        long_path
+    )

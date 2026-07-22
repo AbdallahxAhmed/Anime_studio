@@ -1,5 +1,9 @@
 import logging
-from PySide6.QtCore import Signal
+from html import escape
+from typing import Any
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics, QResizeEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -9,60 +13,86 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from typing import Any
+
+from src.gui.theme import TOKENS
 
 logger = logging.getLogger("anime_studio.gui.widgets.activity_feed")
 
 
 class ActivityFeedWidget(QWidget):
-    """Activity feed widget that displays real-time log messages and is collapsible."""
+    """Collapsible, keyboard-accessible pipeline activity feed."""
 
     export_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._is_collapsed = True
+        self._summary_text = ""
+        self.setAccessibleName("Activity log")
+        self.setAccessibleDescription(
+            "Recent pipeline activity. Expand the panel to read and export the log."
+        )
 
-        # Main Layout
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
+        layout.setContentsMargins(
+            TOKENS.spacing_8,
+            TOKENS.spacing_8,
+            TOKENS.spacing_8,
+            TOKENS.spacing_8,
+        )
+        layout.setSpacing(TOKENS.spacing_8)
 
-        # Top Control Row
         control_layout = QHBoxLayout()
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(TOKENS.spacing_8)
 
-        # Toggle button
         self.toggle_button = QToolButton(self)
-        self.toggle_button.setText("▶")
-        self.toggle_button.setStyleSheet("border: none; font-weight: bold;")
+        self.toggle_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.toggle_button.clicked.connect(self.toggle_collapsed)
         control_layout.addWidget(self.toggle_button)
 
+        # Retain the label as an API-compatible semantic heading without duplicating
+        # the now-visible toggle label in the compact control row.
         self.title_label = QLabel("Activity Log", self)
-        self.title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self.title_label.setProperty("role", "section-title")
+        self.title_label.setVisible(False)
         control_layout.addWidget(self.title_label)
 
-        # Summary label
         self.summary_label = QLabel(self)
-        self.summary_label.setStyleSheet("color: #888888; font-size: 12px;")
-        control_layout.addWidget(self.summary_label)
-
-        control_layout.addStretch()
+        self.summary_label.setProperty("role", "muted")
+        self.summary_label.setAccessibleName("Latest activity")
+        self.summary_label.setAccessibleDescription("Most recent pipeline event")
+        self.summary_label.setWordWrap(False)
+        control_layout.addWidget(self.summary_label, 1)
 
         self.export_button = QPushButton("Export Log", self)
+        self.export_button.setAccessibleName("Export activity log")
+        self.export_button.setAccessibleDescription(
+            "Export the currently retained activity log."
+        )
+        self.export_button.setToolTip("Export the activity log")
         self.export_button.clicked.connect(self._on_export_click)
         self.export_button.setVisible(False)
         control_layout.addWidget(self.export_button)
 
         self.clear_button = QPushButton("Clear Feed", self)
+        self.clear_button.setAccessibleName("Clear activity feed")
+        self.clear_button.setAccessibleDescription(
+            "Remove the currently displayed activity entries."
+        )
+        self.clear_button.setToolTip("Clear all activity entries")
         self.clear_button.clicked.connect(self.clear)
         self.clear_button.setVisible(False)
         control_layout.addWidget(self.clear_button)
 
         layout.addLayout(control_layout)
 
-        # QPlainTextEdit Log Display
         self.log_display = QPlainTextEdit(self)
+        self.log_display.setAccessibleName("Activity log entries")
+        self.log_display.setAccessibleDescription(
+            "Read-only chronological pipeline activity entries."
+        )
+        self.log_display.setToolTip("Pipeline activity log")
         self.log_display.setReadOnly(True)
         self.log_display.setUndoRedoEnabled(False)
         self.log_display.document().setMaximumBlockCount(1000)
@@ -72,87 +102,108 @@ class ActivityFeedWidget(QWidget):
         self.log_display.setVisible(False)
         layout.addWidget(self.log_display)
 
-        self.setMaximumHeight(36)
+        QWidget.setTabOrder(self.toggle_button, self.log_display)
+        QWidget.setTabOrder(self.log_display, self.export_button)
+        QWidget.setTabOrder(self.export_button, self.clear_button)
+        self._set_collapsed_state(True)
 
-        logger.info("ActivityFeedWidget initialized as collapsed")
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._render_summary()
 
     def toggle_collapsed(self) -> None:
-        """Toggle between collapsed and expanded states."""
-        self._is_collapsed = not self._is_collapsed
-        if self._is_collapsed:
-            self.log_display.setVisible(False)
-            self.export_button.setVisible(False)
-            self.clear_button.setVisible(False)
-            self.summary_label.setVisible(True)
-            self.setMaximumHeight(36)
-            self.toggle_button.setText("▶")
+        """Toggle between collapsed summary and expanded log states."""
+        self._set_collapsed_state(not self._is_collapsed)
+
+    def _set_collapsed_state(self, collapsed: bool) -> None:
+        self._is_collapsed = collapsed
+        self.log_display.setVisible(not collapsed)
+        self.export_button.setVisible(not collapsed)
+        self.clear_button.setVisible(not collapsed)
+        self.summary_label.setVisible(collapsed)
+
+        if collapsed:
+            self.setFixedHeight(TOKENS.activity_collapsed_height)
+            self.toggle_button.setText("▶ Activity Log")
+            self.toggle_button.setToolTip("Show activity log")
+            self.toggle_button.setAccessibleName("Show activity log")
+            self.toggle_button.setAccessibleDescription(
+                "Activity log is collapsed. Activate to show log entries."
+            )
         else:
-            self.log_display.setVisible(True)
-            self.export_button.setVisible(True)
-            self.clear_button.setVisible(True)
-            self.summary_label.setVisible(False)
-            self.setMaximumHeight(160)
-            self.toggle_button.setText("▼")
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(TOKENS.activity_expanded_max_height)
+            self.toggle_button.setText("▼ Activity Log")
+            self.toggle_button.setToolTip("Hide activity log")
+            self.toggle_button.setAccessibleName("Hide activity log")
+            self.toggle_button.setAccessibleDescription(
+                "Activity log is expanded. Activate to show the summary only."
+            )
 
     def update_summary(self, text: str) -> None:
-        """Update the 1-line summary displayed when collapsed."""
-        self.summary_label.setText(text)
+        """Update the one-line summary displayed while collapsed."""
+        self._summary_text = text
+        self.summary_label.setToolTip(text)
+        self.summary_label.setAccessibleDescription(text or "No pipeline activity yet")
+        self._render_summary()
+
+    def _render_summary(self) -> None:
+        available_width = self.summary_label.width() if self.isVisible() else 1024
+        elided = QFontMetrics(self.summary_label.font()).elidedText(
+            self._summary_text,
+            Qt.TextElideMode.ElideRight,
+            available_width,
+        )
+        self.summary_label.setText(elided)
 
     def add_entry(self, log_entry: dict[str, Any]) -> None:
-        """Slot to receive log entries, color-code, append, and update summary."""
+        """Append a color-supported, text-labeled activity entry."""
         level = str(log_entry.get("level", "info")).lower()
-        message = log_entry.get("event", "")
+        message = str(log_entry.get("event", ""))
 
         if message == "font_ingestion_complete":
             success = log_entry.get("success_count", 0)
             skipped = log_entry.get("skipped_count", 0)
             failed = log_entry.get("failed_count", 0)
-            source = log_entry.get("source", "unknown")
+            source = str(log_entry.get("source", "unknown"))
             source_display = source.replace("_", " ").title()
-            message = f"Font ingestion complete ({source_display}): {success} new, {skipped} skipped, {failed} failed"
+            message = (
+                f"Font ingestion complete ({source_display}): {success} new, "
+                f"{skipped} skipped, {failed} failed"
+            )
 
-        timestamp = log_entry.get("timestamp", "")
-
-        if timestamp and "T" in timestamp:
-            try:
-                time_part = timestamp.split("T")[1]
-                time_str = time_part.split(".")[0].rstrip("Z")
-            except Exception:
-                time_str = timestamp
-        else:
-            time_str = timestamp
+        timestamp = str(log_entry.get("timestamp", ""))
+        time_str = timestamp
+        if "T" in timestamp:
+            time_str = timestamp.split("T", 1)[1].split(".", 1)[0].rstrip("Z")
 
         time_tag = f"[{time_str}] " if time_str else ""
         level_tag = f"[{level.upper()}]"
-
-        if level in ("error", "critical"):
-            color = "#ff5555"
+        if level in {"error", "critical"}:
+            color = TOKENS.danger
         elif level == "warning":
-            color = "#ffaa00"
+            color = TOKENS.warning
         elif level == "debug":
-            color = "#888888"
+            color = TOKENS.activity_debug
         else:
-            color = "#e0e0e0"
+            color = TOKENS.text_primary
 
         html = (
-            f'<span style="color: #666666;">{time_tag}</span>'
-            f'<span style="color: {color}; font-weight: bold;">{level_tag}</span> '
-            f'<span style="color: {color};">{message}</span>'
+            f'<span style="color: {TOKENS.activity_timestamp};">{escape(time_tag)}</span>'
+            f'<span style="color: {color}; font-weight: bold;">{escape(level_tag)}</span> '
+            f'<span style="color: {color};">{escape(message)}</span>'
         )
 
-        v_scroll = self.log_display.verticalScrollBar()
-        at_bottom = v_scroll.value() >= v_scroll.maximum() - 5
-
+        vertical_scrollbar = self.log_display.verticalScrollBar()
+        at_bottom = vertical_scrollbar.value() >= vertical_scrollbar.maximum() - 5
         self.log_display.appendHtml(html)
-
         if at_bottom:
-            v_scroll.setValue(v_scroll.maximum())
+            vertical_scrollbar.setValue(vertical_scrollbar.maximum())
 
-        # Update 1-line summary
         self.update_summary(message)
 
     def clear(self) -> None:
-        """Clear all log entries and clear summary."""
+        """Clear all retained log entries and the collapsed summary."""
         self.log_display.clear()
         self.update_summary("")
         logger.info("Activity feed cleared")

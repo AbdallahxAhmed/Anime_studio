@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 from src.gui.messages import EpisodeResult, EpisodeStatus, PipelineRunResult
+from src.gui.theme import TOKENS
 from src.gui.widgets.results_table import ResultsTableModel, ResultsTableWidget
 
 
@@ -59,8 +60,10 @@ def test_results_model_data_roles() -> None:
         == "OTS sanitize failed on font XYZ"
     )
 
-    # 2. ForegroundRole check (Orange for PARTIAL)
-    assert model.data(idx_status, Qt.ItemDataRole.ForegroundRole) == QColor("#FF9800")
+    # 2. ForegroundRole check uses the centralized warning color for PARTIAL.
+    assert model.data(idx_status, Qt.ItemDataRole.ForegroundRole) == QColor(
+        TOKENS.warning
+    )
     assert model.data(idx_name, Qt.ItemDataRole.ForegroundRole) is None
 
     # 3. TextAlignmentRole check
@@ -75,7 +78,7 @@ def test_results_model_data_roles() -> None:
     # 4. ToolTipRole check
     assert (
         model.data(idx_status, Qt.ItemDataRole.ToolTipRole)
-        == "OTS sanitize failed on font XYZ"
+        == "Episode status: ⚠ Partial"
     )
     assert (
         model.data(idx_details, Qt.ItemDataRole.ToolTipRole)
@@ -135,7 +138,34 @@ def test_results_table_widget_populate_and_clear() -> None:
 
     widget.populate(run_result)
     assert widget.model.rowCount() == 1
+    assert widget.isHidden() is False
 
     # Simulate Clear Results button press
     widget.clear_button.click()
     assert widget.model.rowCount() == 0
+
+
+def test_results_table_accessibility_and_full_path_tooltips() -> None:
+    """Outcome labels remain readable without color and keep full identity available."""
+    widget = ResultsTableWidget()
+    result = EpisodeResult(
+        name="Long episode 日本語 العربية.mkv",
+        episode_path=Path("show/Long episode 日本語 العربية.mkv"),
+        status=EpisodeStatus.FAILED,
+        fonts_found=0,
+        fonts_missing=2,
+        error_summary="Missing font",
+    )
+    widget.add_episode_result(result)
+
+    name_index = widget.model.index(0, 0)
+    status_index = widget.model.index(0, 1)
+    assert widget.table_view.accessibleName() == "Pipeline result rows"
+    assert widget.clear_button.toolTip() == "Clear the results table"
+    assert widget.model.data(name_index, Qt.ItemDataRole.ToolTipRole) == str(
+        result.episode_path
+    )
+    assert (
+        widget.model.data(status_index, Qt.ItemDataRole.AccessibleTextRole)
+        == "Status: ✕ Failed"
+    )
