@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qt Accessibility"
+  short_description: "Improve Anime Studio Qt accessibility"
+  default_prompt: "Audit Anime Studio PySide6 accessibility and keyboard behavior."

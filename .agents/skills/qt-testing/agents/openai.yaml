@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qt Testing"
+  short_description: "Test Anime Studio Qt workflows"
+  default_prompt: "Write deterministic pytest-qt and qasync tests for Anime Studio."

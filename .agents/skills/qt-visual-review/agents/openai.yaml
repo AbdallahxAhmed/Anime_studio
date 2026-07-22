@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qt Visual Review"
+  short_description: "Review Anime Studio Qt visuals"
+  default_prompt: "Review Anime Studio PySide6 views with the screenshot matrix."

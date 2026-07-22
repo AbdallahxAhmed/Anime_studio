@@ -1,0 +1,4 @@
+interface:
+  display_name: "PySide6 Modern UI"
+  short_description: "Build Anime Studio PySide6 desktop UI"
+  default_prompt: "Apply Anime Studio PySide6 modern desktop UI conventions."
