@@ -2,14 +2,16 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+from datetime import datetime
 from os.path import normcase
 from typing import Any, TYPE_CHECKING
 from pathlib import Path
 from qasync import asyncSlot
+from PySide6.QtGui import QFontMetrics, QKeyEvent, QResizeEvent
 
 if TYPE_CHECKING:
     from src.models.run_manifest import RunManifest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -20,9 +22,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLabel,
     QFileDialog,
+    QSizePolicy,
 )
 
-from src.errors import AnimeStudioError
+from src.errors import AnimeStudioError, PipelineStoppedError
 from src.gui.signals import SignalBridge
 from src.gui.widgets import (
     ActivityFeedWidget,
@@ -31,6 +34,7 @@ from src.gui.widgets import (
     ShowSidebarWidget,
     EpisodeTableWidget,
 )
+from src.gui.theme import TOKENS
 from src.models.pipeline import LibraryScanOutput, ShowSummary, ShowStatus
 
 logger = logging.getLogger("anime_studio.gui.main_window")
@@ -68,12 +72,18 @@ class MainWindow(QMainWindow):
         self._current_show_name: str | None = None
         self._current_show_path: Path | None = None
         self._stop_event: asyncio.Event | None = None
+        self._show_name_text = "Select a show to start"
 
         # Initialize SignalBridge
         self.signal_bridge = SignalBridge()
 
         # Set window properties
         self.setWindowTitle("Anime Studio v3 - Forensics Dashboard")
+        self.setAccessibleName("Anime Studio desktop application")
+        self.setAccessibleDescription(
+            "Anime subtitle forensics workspace with show navigation, episode "
+            "selection, pipeline controls, progress, and activity log."
+        )
         self.resize(1100, 800)
         self.setMinimumSize(800, 600)
 
@@ -83,76 +93,121 @@ class MainWindow(QMainWindow):
 
         # Root layout (vertical)
         root_layout = QVBoxLayout(central_widget)
-        root_layout.setContentsMargins(10, 10, 10, 10)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(
+            TOKENS.spacing_16,
+            TOKENS.spacing_16,
+            TOKENS.spacing_16,
+            TOKENS.spacing_16,
+        )
+        root_layout.setSpacing(TOKENS.spacing_12)
 
         # Header Bar (44px fixed height)
         self._header_bar = QWidget(central_widget)
-        self._header_bar.setFixedHeight(44)
+        self._header_bar.setFixedHeight(TOKENS.header_height)
         header_layout = QHBoxLayout(self._header_bar)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(TOKENS.spacing_12)
 
-        app_title = QLabel("Anime Studio", self._header_bar)
-        app_title.setStyleSheet("font-weight: bold; font-size: 16px;")
-        header_layout.addWidget(app_title)
+        self.app_title_label = QLabel("Anime Studio", self._header_bar)
+        self.app_title_label.setProperty("role", "app-title")
+        self.app_title_label.setAccessibleName("Anime Studio")
+        self.app_title_label.setAccessibleDescription("Application title")
+        header_layout.addWidget(self.app_title_label)
 
         # Read-only library path label
-        lib_path_str = (
+        self._library_path_text = (
             str(self.config.library_path)
             if self.config.library_path
             else "No Library Path Configured"
         )
-        self.library_path_label = QLabel(lib_path_str, self._header_bar)
-        self.library_path_label.setStyleSheet(
-            "color: #888888; font-style: italic; font-size: 13px;"
+        self.library_path_label = QLabel(self._library_path_text, self._header_bar)
+        self.library_path_label.setProperty("role", "muted")
+        self.library_path_label.setAccessibleName("Library path")
+        self.library_path_label.setAccessibleDescription(self._library_path_text)
+        self.library_path_label.setToolTip(self._library_path_text)
+        self.library_path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        header_layout.addWidget(self.library_path_label)
+        self.library_path_label.setWordWrap(False)
+        self.library_path_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        header_layout.addWidget(self.library_path_label, 1)
         header_layout.addStretch()
 
-        # Settings button
-        self.settings_btn = QPushButton("⚙ Settings", self._header_bar)
+        # This action imports local fonts; its label states the effect directly.
+        self.settings_btn = QPushButton("Import Fonts", self._header_bar)
+        self.settings_btn.setProperty("role", "secondary")
+        self.settings_btn.setAccessibleName("Import fonts")
+        self.settings_btn.setAccessibleDescription(
+            "Choose a folder of local fonts to add to the font cache."
+        )
+        self.settings_btn.setToolTip("Import local fonts from a folder")
         header_layout.addWidget(self.settings_btn)
 
         root_layout.addWidget(self._header_bar)
 
         # Main splitter (horizontal)
-        splitter = QSplitter(Qt.Orientation.Horizontal, central_widget)
-        root_layout.addWidget(splitter)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal, central_widget)
+        root_layout.addWidget(self._splitter)
 
         # Left panel: ShowSidebarWidget
-        self._sidebar = ShowSidebarWidget(self.signal_bridge, splitter)
-        splitter.addWidget(self._sidebar)
+        self._sidebar = ShowSidebarWidget(self.signal_bridge, self._splitter)
+        self._splitter.addWidget(self._sidebar)
 
         # Right panel: MainPanel (vertical)
-        main_panel = QWidget(splitter)
+        main_panel = QWidget(self._splitter)
         main_panel_layout = QVBoxLayout(main_panel)
         main_panel_layout.setContentsMargins(0, 0, 0, 0)
-        main_panel_layout.setSpacing(10)
+        main_panel_layout.setSpacing(TOKENS.spacing_12)
 
         # Show Header Bar (56px)
         self._show_header = QWidget(main_panel)
-        self._show_header.setFixedHeight(56)
+        self._show_header.setFixedHeight(TOKENS.header_height + TOKENS.spacing_12)
         show_header_layout = QHBoxLayout(self._show_header)
         show_header_layout.setContentsMargins(0, 0, 0, 0)
+        show_header_layout.setSpacing(TOKENS.spacing_8)
 
         self._show_name_label = QLabel("Select a show to start", self._show_header)
-        self._show_name_label.setStyleSheet("font-weight: bold; font-size: 18px;")
-        show_header_layout.addWidget(self._show_name_label)
+        self._show_name_label.setProperty("role", "show-title")
+        self._show_name_label.setAccessibleName("Selected show")
+        self._show_name_label.setAccessibleDescription("No show selected")
+        show_header_layout.addWidget(self._show_name_label, 1)
 
         self._show_subtitle_label = QLabel("", self._show_header)
-        self._show_subtitle_label.setStyleSheet("color: #888888; font-size: 13px;")
+        self._show_subtitle_label.setProperty("role", "secondary")
+        self._show_subtitle_label.setAccessibleName("Selected show episode count")
         show_header_layout.addWidget(self._show_subtitle_label)
 
-        show_header_layout.addStretch()
-
         self.undo_button = QPushButton("Undo", self._show_header)
+        self.undo_button.setMinimumWidth(76)
+        self.undo_button.setProperty("role", "secondary")
+        self.undo_button.setAccessibleName("Undo a previous pipeline run")
+        self.undo_button.setAccessibleDescription(
+            "Open the run history and undo a selected prior pipeline operation."
+        )
+        self.undo_button.setToolTip("Undo a previous pipeline run")
         show_header_layout.addWidget(self.undo_button)
 
         self.stop_button = QPushButton("Stop", self._show_header)
+        self.stop_button.setMinimumWidth(116)
+        self.stop_button.setProperty("role", "danger")
+        self.stop_button.setAccessibleName("Stop pipeline")
+        self.stop_button.setAccessibleDescription(
+            "Request a safe, cooperative stop for the active pipeline run."
+        )
+        self.stop_button.setToolTip("Stop the active pipeline run")
         self.stop_button.setVisible(False)
         show_header_layout.addWidget(self.stop_button)
 
         self.run_button = QPushButton("Run 0 selected", self._show_header)
+        self.run_button.setMinimumWidth(148)
+        self.run_button.setProperty("role", "primary")
+        self.run_button.setAccessibleName("Run 0 selected episodes")
+        self.run_button.setAccessibleDescription(
+            "Select episodes first, then run the subtitle forensics pipeline."
+        )
+        self.run_button.setToolTip("Run the selected episodes")
         self.run_button.setEnabled(False)
         show_header_layout.addWidget(self.run_button)
 
@@ -161,6 +216,17 @@ class MainWindow(QMainWindow):
         # Episode Table Widget
         self._episode_table = EpisodeTableWidget(main_panel)
         main_panel_layout.addWidget(self._episode_table)
+
+        self.empty_state_label = QLabel(
+            "Select a show to review its subtitle-ready episodes.", main_panel
+        )
+        self.empty_state_label.setProperty("role", "secondary")
+        self.empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state_label.setWordWrap(True)
+        self.empty_state_label.setAccessibleName("Episode workspace status")
+        self.empty_state_label.setAccessibleDescription(self.empty_state_label.text())
+        main_panel_layout.addWidget(self.empty_state_label)
+        self._episode_table.setVisible(False)
 
         # Progress Panel Widget
         self.progress_panel = ProgressPanelWidget(main_panel)
@@ -175,10 +241,10 @@ class MainWindow(QMainWindow):
         self.results_table.setVisible(False)
         main_panel_layout.addWidget(self.results_table)
 
-        splitter.addWidget(main_panel)
+        self._splitter.addWidget(main_panel)
 
         # Set initial splitter sizes (220px fixed for sidebar, rest for main panel)
-        splitter.setSizes([220, 880])
+        self._splitter.setSizes([TOKENS.sidebar_width, 880])
 
         # Wire thread-safe log bridge signals directly to slots
         log_bridge.log_received.connect(self.signal_bridge.log_received)
@@ -207,9 +273,17 @@ class MainWindow(QMainWindow):
         self.undo_button.clicked.connect(self._on_undo_click)
         self.activity_feed.export_requested.connect(self._on_export_log)
 
+        QWidget.setTabOrder(self.settings_btn, self._sidebar._list_widget)
+        QWidget.setTabOrder(self._sidebar._list_widget, self._episode_table._table)
+        QWidget.setTabOrder(self._episode_table._table, self.undo_button)
+        QWidget.setTabOrder(self.undo_button, self.run_button)
+        QWidget.setTabOrder(self.run_button, self.stop_button)
+        QWidget.setTabOrder(self.stop_button, self.activity_feed.toggle_button)
+
         # Setup Drag & Drop
         self.setAcceptDrops(True)
         self._default_style = self.styleSheet()
+        self._render_library_path_label()
 
         logger.info("MainWindow initialized and signal bridge wired")
 
@@ -295,10 +369,23 @@ class MainWindow(QMainWindow):
         self._selection_generation += 1
         self._current_show_name = None
         self._current_show_path = None
-        self._show_name_label.setText("Select a show to start")
+        self._show_name_text = "Select a show to start"
+        self._show_name_label.setText(self._show_name_text)
+        self._show_name_label.setToolTip("")
+        self._show_name_label.setAccessibleDescription("No show selected")
+        self._render_show_name_label()
+        self._show_name_label.setAccessibleDescription("No show selected")
         self._show_subtitle_label.setText("")
         self._episode_table.populate([])
+        self._episode_table.setVisible(False)
+        self.empty_state_label.setText(
+            "Select a show to review its subtitle-ready episodes."
+        )
+        self.empty_state_label.setAccessibleDescription(self.empty_state_label.text())
+        self.empty_state_label.setVisible(True)
         self.run_button.setText("Run 0 selected")
+        self.run_button.setAccessibleName("Run 0 selected episodes")
+        self.run_button.setToolTip("Select one or more episodes to run")
         self.run_button.setEnabled(False)
         return self._selection_generation
 
@@ -318,12 +405,28 @@ class MainWindow(QMainWindow):
         """Display an already-computed folder scan without performing I/O."""
         self._current_show_name = name
         self._current_show_path = path
+        self._show_name_text = name
         self._show_name_label.setText(name)
+        self._show_name_label.setToolTip(name)
+        self._show_name_label.setAccessibleDescription(f"Selected show: {name}")
         self._episode_table.populate(scan_output.episodes)
-        self._show_subtitle_label.setText(
-            f" ({len(scan_output.episodes)} episodes found)"
-        )
+        subtitle = f"{len(scan_output.episodes)} episodes found"
+        self._show_subtitle_label.setText(f" ({subtitle})")
+        self._show_subtitle_label.setToolTip(subtitle)
+        self._show_subtitle_label.setAccessibleDescription(subtitle)
+        has_episodes = bool(scan_output.episodes)
+        self._episode_table.setVisible(has_episodes)
+        self.empty_state_label.setVisible(not has_episodes)
+        if not has_episodes:
+            self.empty_state_label.setText(
+                "No subtitle-ready episodes were found for this show."
+            )
+            self.empty_state_label.setAccessibleDescription(
+                self.empty_state_label.text()
+            )
         self.progress_panel.setVisible(False)
+        self._render_show_name_label()
+        QTimer.singleShot(0, self._render_show_name_label)
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_show_selected(self, name: str, path: Path) -> None:
@@ -411,6 +514,12 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, paths: list[Path]) -> None:
         count = len(paths)
         self.run_button.setText(f"Run {count} selected")
+        self.run_button.setAccessibleName(f"Run {count} selected episodes")
+        self.run_button.setAccessibleDescription(
+            f"Run the subtitle forensics pipeline for exactly {count} selected "
+            "episode(s)."
+        )
+        self.run_button.setToolTip(f"Run {count} selected episode(s)")
         self.run_button.setEnabled(
             count > 0
             and self._current_show_path is not None
@@ -457,6 +566,10 @@ class MainWindow(QMainWindow):
             )
             return
 
+        pre_run_status = self._sidebar.get_show_status(run_show_path)
+        if pre_run_status is None:
+            pre_run_status = ShowStatus.READY
+
         p = Path(library_path).expanduser().resolve()
         if not p.is_dir():
             QMessageBox.critical(
@@ -475,13 +588,21 @@ class MainWindow(QMainWindow):
         self.run_button.setEnabled(False)
         self.undo_button.setEnabled(False)
         self.settings_btn.setEnabled(False)
+        self._episode_table.setEnabled(False)
         self._sidebar.set_navigation_enabled(False)
         self.stop_button.setVisible(True)
         self.stop_button.setEnabled(True)
         self.stop_button.setText("Stop")
+        self.stop_button.setAccessibleName("Stop pipeline")
+        self.stop_button.setAccessibleDescription(
+            "Request a safe, cooperative stop for the active pipeline run."
+        )
+        self.stop_button.setToolTip("Stop the active pipeline run")
         self.results_table.clear_results()
+        self.results_table.setVisible(False)
 
-        self._stop_event = asyncio.Event()
+        stop_event = asyncio.Event()
+        self._stop_event = stop_event
         processing_status_persisted = False
 
         try:
@@ -489,7 +610,14 @@ class MainWindow(QMainWindow):
             # guarded lifecycle so every expected failure reaches cleanup.
             await self._show_index.update_status(run_show_path, ShowStatus.PROCESSING)
             processing_status_persisted = True
-            self._sidebar.update_show_status(run_show_path, ShowStatus.PROCESSING)
+            if stop_event.is_set():
+                raise PipelineStoppedError("Pipeline stopped by user")
+            if (
+                run_generation == self._selection_generation
+                and run_show_path == self._current_show_path
+                and run_show_name == self._current_show_name
+            ):
+                self._sidebar.update_show_status(run_show_path, ShowStatus.PROCESSING)
 
             self.signal_bridge.progress_updated.emit(
                 ProgressState(
@@ -511,13 +639,17 @@ class MainWindow(QMainWindow):
 
             report = await self.pipeline_runner.run(
                 config,
-                stop_event=self._stop_event,
+                stop_event=stop_event,
                 checkpoint_manager=self._checkpoint_manager,
                 undo_service=self._undo_service,
             )
 
+            # A runner can complete an in-flight bounded operation after Stop.
+            # Never render a successful result once the UI has observed Stop.
+            if stop_event.is_set():
+                raise PipelineStoppedError("Pipeline stopped by user")
+
             run_result = map_pipeline_report(report, p, config.dry_run)
-            self.signal_bridge.pipeline_finished.emit(run_result)
 
             # Update statuses on completion
             final_status = ShowStatus.ALL_DONE
@@ -526,6 +658,8 @@ class MainWindow(QMainWindow):
                 and run_show_path == self._current_show_path
                 and run_show_name == self._current_show_name
             )
+            if is_current_run_show:
+                self.signal_bridge.pipeline_finished.emit(run_result)
             for ep_res in run_result.episodes:
                 status_str = (
                     ep_res.status.value
@@ -539,24 +673,54 @@ class MainWindow(QMainWindow):
                 if status_str.lower() in ("failed", "error"):
                     final_status = ShowStatus.WARNING
 
-            self._sidebar.update_show_status(run_show_path, final_status)
+            if stop_event.is_set():
+                raise PipelineStoppedError("Pipeline stopped by user")
+            if is_current_run_show:
+                self._sidebar.update_show_status(run_show_path, final_status)
             await self._show_index.update_status(run_show_path, final_status)
+            if stop_event.is_set():
+                raise PipelineStoppedError("Pipeline stopped by user")
+            self.signal_bridge.progress_updated.emit(
+                ProgressState(
+                    stage=ProgressStage.COMPLETE,
+                    status_text="Pipeline executed successfully!",
+                )
+            )
 
-            if self._stop_event.is_set():
+        except asyncio.CancelledError:
+            raise
+        except PipelineStoppedError:
+            is_current_run_show = (
+                run_generation == self._selection_generation
+                and run_show_path == self._current_show_path
+                and run_show_name == self._current_show_name
+            )
+            if is_current_run_show:
+                self._sidebar.update_show_status(run_show_path, pre_run_status)
+                self.progress_panel.setVisible(True)
                 self.signal_bridge.progress_updated.emit(
                     ProgressState(
-                        stage=ProgressStage.COMPLETE,
-                        status_text="Pipeline stopped by user. Checkpoint saved.",
+                        stage=ProgressStage.STOPPED,
+                        status_text="Pipeline stopped by user.",
                     )
                 )
-            else:
-                self.signal_bridge.progress_updated.emit(
-                    ProgressState(
-                        stage=ProgressStage.COMPLETE,
-                        status_text="Pipeline executed successfully!",
+            if processing_status_persisted:
+                try:
+                    await self._show_index.update_status(run_show_path, pre_run_status)
+                except Exception as restore_error:
+                    # Do not let a secondary persistent-status failure escape
+                    # a qasync slot or recursively attempt another write.
+                    logger.warning(
+                        "Could not restore show status after user stop: %s",
+                        restore_error,
                     )
-                )
-
+            self.signal_bridge.log_received.emit(
+                {
+                    "event": "Pipeline stopped by user.",
+                    "level": "info",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
         except (AnimeStudioError, OSError, ValueError, RuntimeError) as e:
             logger.error(f"Forensics pipeline execution failed: {e}")
             self.signal_bridge.progress_updated.emit(
@@ -567,7 +731,12 @@ class MainWindow(QMainWindow):
             self.signal_bridge.pipeline_error.emit(str(e))
 
             if processing_status_persisted:
-                self._sidebar.update_show_status(run_show_path, ShowStatus.WARNING)
+                if (
+                    run_generation == self._selection_generation
+                    and run_show_path == self._current_show_path
+                    and run_show_name == self._current_show_name
+                ):
+                    self._sidebar.update_show_status(run_show_path, ShowStatus.WARNING)
                 await self._show_index.update_status(run_show_path, ShowStatus.WARNING)
 
             from src.gui.messages import ErrorInfo
@@ -586,15 +755,22 @@ class MainWindow(QMainWindow):
             self.stop_button.setVisible(False)
             self.undo_button.setEnabled(True)
             self.settings_btn.setEnabled(True)
+            self._episode_table.setEnabled(True)
             self._sidebar.set_navigation_enabled(not self._is_refreshing)
             self._on_selection_changed(self._episode_table.get_selected_paths())
 
     def _on_stop_click(self) -> None:
         """Handle Stop button click by setting the stop event."""
-        if self._stop_event:
+        if self._stop_event and not self._stop_event.is_set():
             self._stop_event.set()
             self.stop_button.setEnabled(False)
             self.stop_button.setText("Stopping...")
+            self.stop_button.setAccessibleName("Stopping pipeline")
+            self.stop_button.setAccessibleDescription(
+                "A safe stop has been requested. Running operations will finish "
+                "before the interface returns to idle."
+            )
+            self.stop_button.setToolTip("Stopping the active pipeline run")
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_undo_click(self) -> None:
@@ -753,6 +929,55 @@ class MainWindow(QMainWindow):
                 )
                 self.signal_bridge.progress_updated.emit(state)
 
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """Keep a narrow header readable while retaining the full path in a tooltip."""
+        super().resizeEvent(event)
+        self._render_library_path_label()
+        self._render_show_name_label()
+        QTimer.singleShot(0, self._render_library_path_label)
+        QTimer.singleShot(0, self._render_show_name_label)
+
+    def _render_library_path_label(self) -> None:
+        """Elide a long library path visually without changing its identity."""
+        available_width = self.library_path_label.width()
+        if available_width <= 0:
+            self.library_path_label.setText(self._library_path_text)
+            return
+        rendered = QFontMetrics(self.library_path_label.font()).elidedText(
+            self._library_path_text,
+            Qt.TextElideMode.ElideMiddle,
+            available_width,
+        )
+        self.library_path_label.setText(rendered)
+        self.library_path_label.setToolTip(self._library_path_text)
+        self.library_path_label.setAccessibleDescription(self._library_path_text)
+
+    def _render_show_name_label(self) -> None:
+        """Elide long show titles in the header while retaining the full tooltip."""
+        available_width = self._show_name_label.width()
+        if available_width <= 0:
+            self._show_name_label.setText(self._show_name_text)
+            return
+        self._show_name_label.setText(
+            QFontMetrics(self._show_name_label.font()).elidedText(
+                self._show_name_text,
+                Qt.TextElideMode.ElideRight,
+                available_width,
+            )
+        )
+        self._show_name_label.setToolTip(self._show_name_text)
+        self._show_name_label.setAccessibleDescription(
+            f"Selected show: {self._show_name_text}"
+        )
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Use Escape as a safe Stop shortcut only while a pipeline is active."""
+        if event.key() == Qt.Key.Key_Escape and self._pipeline_running:
+            self._on_stop_click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event: Any) -> None:
         """Override close event to confirm exit if pipeline is active."""
         if self._pipeline_running:
@@ -794,7 +1019,9 @@ class MainWindow(QMainWindow):
             urls = event.mimeData().urls()
             if any(self._is_valid_drop(url) for url in urls):
                 event.acceptProposedAction()
-                self.setStyleSheet("QMainWindow { border: 3px solid #4CAF50; }")
+                self.setStyleSheet(
+                    f"QMainWindow {{ border: 2px solid {TOKENS.accent}; }}"
+                )
                 return
         event.ignore()
 

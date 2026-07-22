@@ -1,6 +1,8 @@
+import asyncio
+from pathlib import Path
 from typing import Any, Iterator, cast
 import structlog
-from src.ports.font_hunter import HunterProtocol
+from src.ports.font_hunter import HunterProtocol, RunScopedHunterProtocol
 from src.core.circuit_breaker import CircuitBreaker
 
 logger = structlog.get_logger()
@@ -44,6 +46,26 @@ class HunterRegistry:
                 cooldown_s=self.cooldown_s,
             )
         return self._circuits[hunter_name]
+
+    def for_run(
+        self,
+        discovery_root: Path | None,
+        stop_event: asyncio.Event | None = None,
+    ) -> "HunterRegistry":
+        """Build a run-local chain without mutating registered hunter instances.
+
+        Hunters that opt into ``RunScopedHunterProtocol`` receive a fresh,
+        immutable discovery scope. Stateless hunters are safely reused.
+        """
+        scoped_registry = HunterRegistry(cooldown_s=self.cooldown_s)
+        for hunter in self._hunters.values():
+            scoped_hunter: HunterProtocol
+            if isinstance(hunter, RunScopedHunterProtocol):
+                scoped_hunter = hunter.for_run(discovery_root, stop_event)
+            else:
+                scoped_hunter = hunter
+            scoped_registry.register(scoped_hunter)
+        return scoped_registry
 
     def iter_hunters(self) -> Iterator[HunterProtocol]:
         """Iterate hunters in ascending priority order, skipping OPEN circuit ones."""

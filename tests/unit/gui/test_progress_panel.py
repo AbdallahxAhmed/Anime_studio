@@ -58,7 +58,7 @@ def test_progress_panel_muxing_state() -> None:
 
 
 def test_progress_panel_complete_state() -> None:
-    """Verify that update_state with ProgressStage.COMPLETE applies success styling."""
+    """Verify that update_state with ProgressStage.COMPLETE uses success tokens."""
     panel = ProgressPanelWidget()
     state = ProgressState(stage=ProgressStage.COMPLETE, status_text="Done!")
 
@@ -66,11 +66,12 @@ def test_progress_panel_complete_state() -> None:
     assert panel.isVisible() is True
     assert panel.status_label.text() == "Done!"
     assert panel.progress_bar.value() == 100
-    assert "#4CAF50" in panel.progress_bar.styleSheet()
+    assert panel.progress_bar.property("progressState") == "success"
+    assert panel.progress_bar.accessibleDescription() == "Done!"
 
 
 def test_progress_panel_error_state() -> None:
-    """Verify that update_state with ProgressStage.ERROR applies failure styling."""
+    """Verify that update_state with ProgressStage.ERROR uses error tokens."""
     panel = ProgressPanelWidget()
     state = ProgressState(
         stage=ProgressStage.ERROR, status_text="Something went wrong!"
@@ -80,4 +81,18 @@ def test_progress_panel_error_state() -> None:
     assert panel.isVisible() is True
     assert panel.status_label.text() == "Something went wrong!"
     assert panel.progress_bar.value() == 100
-    assert "#F44336" in panel.progress_bar.styleSheet()
+    assert panel.progress_bar.property("progressState") == "error"
+
+
+def test_progress_panel_stopped_state_is_neutral_and_accessible() -> None:
+    """A user stop has a neutral visible state rather than success or error."""
+    panel = ProgressPanelWidget()
+    panel.update_state(
+        ProgressState(stage=ProgressStage.STOPPED, status_text="Run stopped by user")
+    )
+
+    assert panel.isVisible() is True
+    assert panel.status_label.text() == "Run stopped by user"
+    assert panel.progress_bar.value() == 0
+    assert panel.progress_bar.property("progressState") == "stopped"
+    assert panel.status_label.accessibleDescription() == "Run stopped by user"

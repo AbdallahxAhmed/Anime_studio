@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 import re
 from difflib import SequenceMatcher
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any
 import structlog
 from src.models.pipeline import (
@@ -12,12 +12,44 @@ from src.models.pipeline import (
     LibraryScanOutput,
 )
 from src.models.subtitle import SubtitleSource
+from src.errors import PipelineStoppedError
 
 if TYPE_CHECKING:
     from src.ports.mkvmerge import MkvmergePort
     from src.models.pipeline import ShowNode
 
 logger = structlog.get_logger()
+
+
+def _raise_if_stopped(stop_event: asyncio.Event | None) -> None:
+    """Abort the current scan invocation when its caller requests a stop."""
+    if stop_event is not None and stop_event.is_set():
+        raise PipelineStoppedError("Library scan stopped by user")
+
+
+def _list_directory_entries(directory: Path) -> tuple[tuple[Path, bool, bool], ...]:
+    """List one directory without consulting run state.
+
+    This intentionally small blocking unit is the only filesystem work sent to a
+    worker during Phase 1.  Cancellation remains exclusively on the event-loop
+    thread before and after the call.
+    """
+    entries: list[tuple[Path, bool, bool]] = []
+    for child in sorted(directory.iterdir(), key=lambda path: path.name.casefold()):
+        try:
+            entries.append((child, child.is_dir(), child.is_file()))
+        except OSError:
+            # A concurrently removed or inaccessible child is handled by the
+            # normal best-effort scanner behavior.
+            continue
+    return tuple(entries)
+
+
+async def _cooperative_checkpoint(stop_event: asyncio.Event | None) -> None:
+    """Yield to Qt/qasync after a bounded scan unit and re-check Stop."""
+    _raise_if_stopped(stop_event)
+    await asyncio.sleep(0)
+    _raise_if_stopped(stop_event)
 
 
 def normalize(name: str) -> str:
@@ -174,9 +206,13 @@ class LibraryScanner:
     def __init__(self, mkvmerge: "MkvmergePort | None" = None) -> None:
         self._mkvmerge = mkvmerge
 
-    def _build_show_tree(
-        self, lib_path: Path, scan_results: list[LibraryScanResult]
+    async def _build_show_tree(
+        self,
+        lib_path: Path,
+        scan_results: list[LibraryScanResult],
+        stop_event: asyncio.Event | None = None,
     ) -> list["ShowNode"]:
+        """Build the library tree using the same bounded async directory walk."""
         from src.models.pipeline import ShowNode, SubFolderNode, EpisodeContext
 
         episodes_by_path = {
@@ -184,34 +220,37 @@ class LibraryScanner:
         }
 
         show_nodes = []
+        _raise_if_stopped(stop_event)
         try:
-            top_dirs = sorted(
-                [
-                    d
-                    for d in lib_path.iterdir()
-                    if d.is_dir() and not _is_excluded(d, lib_path)
-                ],
-                key=lambda d: d.name,
-            )
-        except Exception:
+            root_entries = await asyncio.to_thread(_list_directory_entries, lib_path)
+        except OSError:
             return []
+        _raise_if_stopped(stop_event)
+        top_dirs = [
+            path
+            for path, is_directory, _ in root_entries
+            if is_directory and not _is_excluded(path, lib_path)
+        ]
 
         for show_dir in top_dirs:
+            _raise_if_stopped(stop_event)
             resolved_show = show_dir.resolve()
             sub_folders = []
             try:
-                sub_dirs = sorted(
-                    [
-                        d
-                        for d in show_dir.iterdir()
-                        if d.is_dir() and not _is_excluded(d, lib_path)
-                    ],
-                    key=lambda d: d.name,
+                show_entries = await asyncio.to_thread(
+                    _list_directory_entries, show_dir
                 )
-            except Exception:
-                sub_dirs = []
+            except OSError:
+                show_entries = ()
+            _raise_if_stopped(stop_event)
+            sub_dirs = [
+                path
+                for path, is_directory, _ in show_entries
+                if is_directory and not _is_excluded(path, lib_path)
+            ]
 
             for sub_dir in sub_dirs:
+                _raise_if_stopped(stop_event)
                 resolved_sub = sub_dir.resolve()
                 sub_episodes = tuple(
                     ep_ctx
@@ -227,6 +266,7 @@ class LibraryScanner:
                             episodes=sub_episodes,
                         )
                     )
+                await _cooperative_checkpoint(stop_event)
 
             direct_episodes = tuple(
                 ep_ctx
@@ -243,25 +283,31 @@ class LibraryScanner:
                         episodes=direct_episodes,
                     )
                 )
+            await _cooperative_checkpoint(stop_event)
 
         return show_nodes
 
-    async def scan_folder(self, folder_path: Path) -> LibraryScanOutput:
+    async def scan_folder(
+        self, folder_path: Path, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
         """Scan a single show folder without touching the full library."""
         lib_path = Path(folder_path).resolve()
 
         # Phase 1: Filesystem walk — match external .ass files
-        phase1_results, font_dirs, unmatched_mkvs = await asyncio.to_thread(
-            self._phase1_walk, lib_path
+        _raise_if_stopped(stop_event)
+        phase1_results, font_dirs, unmatched_mkvs = await self._phase1_walk(
+            lib_path, stop_event
         )
+        _raise_if_stopped(stop_event)
 
         # Phase 2: Embedded detection for unmatched MKVs (async)
         phase2_results = []
         if self._mkvmerge and unmatched_mkvs:
             phase2_results = await self._phase2_embedded_detection(
-                unmatched_mkvs, lib_path
+                unmatched_mkvs, lib_path, stop_event
             )
 
+        _raise_if_stopped(stop_event)
         all_results = phase1_results + phase2_results
         sorted_results = sorted(all_results, key=lambda r: r.episode_path.name)
         return LibraryScanOutput(
@@ -270,37 +316,41 @@ class LibraryScanner:
             show_tree=(),
         )
 
-    async def scan(self, library_path: Path) -> LibraryScanOutput:
+    async def scan(
+        self, library_path: Path, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
         """Scan the library_path for MKV files, matching ASS subtitle
         siblings, Fonts directories, and embedded subtitle tracks."""
 
         lib_path = Path(library_path).resolve()
 
         # Phase 1: Filesystem walk — match external .ass files
-        phase1_results, font_dirs, unmatched_mkvs = await asyncio.to_thread(
-            self._phase1_walk, lib_path
+        _raise_if_stopped(stop_event)
+        phase1_results, font_dirs, unmatched_mkvs = await self._phase1_walk(
+            lib_path, stop_event
         )
+        _raise_if_stopped(stop_event)
 
         # Phase 2: Embedded detection for unmatched MKVs (async)
         phase2_results = []
         if self._mkvmerge and unmatched_mkvs:
             phase2_results = await self._phase2_embedded_detection(
-                unmatched_mkvs, lib_path
+                unmatched_mkvs, lib_path, stop_event
             )
 
+        _raise_if_stopped(stop_event)
         all_results = phase1_results + phase2_results
         sorted_results = sorted(all_results, key=lambda r: r.episode_path.name)
-        show_tree = await asyncio.to_thread(
-            self._build_show_tree, lib_path, sorted_results
-        )
+        show_tree = await self._build_show_tree(lib_path, sorted_results, stop_event)
+        _raise_if_stopped(stop_event)
         return LibraryScanOutput(
             episodes=sorted_results,
             font_directories=sorted(list(font_dirs)),
             show_tree=tuple(show_tree),
         )
 
-    def _phase1_walk(
-        self, lib_path: Path
+    async def _phase1_walk(
+        self, lib_path: Path, stop_event: asyncio.Event | None = None
     ) -> tuple[list[LibraryScanResult], set[Path], list[tuple[Path, str]]]:
         """Walk the filesystem to find MKV-ASS pairs and font directories.
 
@@ -312,62 +362,81 @@ class LibraryScanner:
         font_dirs: set[Path] = set()
         unmatched_mkvs: list[tuple[Path, str]] = []
 
-        if not lib_path.exists() or not lib_path.is_dir():
+        _raise_if_stopped(stop_event)
+        if not await asyncio.to_thread(lib_path.is_dir):
+            _raise_if_stopped(stop_event)
             logger.warning(
                 "library path does not exist or is not a directory", path=lib_path
             )
             return results, font_dirs, unmatched_mkvs
 
-        # Group MKV files by parent directory to scan siblings efficiently
+        # Group MKV files by parent directory to scan siblings efficiently.  The
+        # event loop owns cancellation; workers list exactly one directory and
+        # never receive the asyncio.Event.
         mkv_by_parent: dict[Path, list[Path]] = defaultdict(list)
-        for p in lib_path.rglob("*.mkv"):
-            if not _is_excluded(p, lib_path):
-                mkv_by_parent[p.parent].append(p)
-
-        for parent, parent_mkv_files in mkv_by_parent.items():
-            # Scan parent's subdirectories for "fonts" or "Fonts" case-insensitively
+        entries_by_parent: dict[Path, tuple[tuple[Path, bool, bool], ...]] = {}
+        directories: deque[Path] = deque([lib_path])
+        while directories:
+            _raise_if_stopped(stop_event)
+            directory = directories.popleft()
             try:
-                for child in parent.iterdir():
-                    if child.is_dir() and child.name.lower() == "fonts":
-                        resolved_child = child.resolve()
-                        if not _is_excluded(resolved_child, lib_path):
-                            font_dirs.add(resolved_child)
-            except Exception as e:
-                logger.error(
-                    "failed to search for font directories",
-                    directory=parent,
-                    error=str(e),
-                )
-
-            try:
-                # List sibling ASS files
-                ass_files = [
-                    p
-                    for p in parent.iterdir()
-                    if p.is_file() and p.suffix.lower() == ".ass"
-                ]
-            except Exception as e:
+                children = await asyncio.to_thread(_list_directory_entries, directory)
+            except OSError as e:
                 logger.error(
                     "failed to list directory contents",
-                    directory=parent,
+                    directory=directory,
                     error=str(e),
                 )
                 continue
+            _raise_if_stopped(stop_event)
+            entries_by_parent[directory] = children
+            for child, is_directory, is_file in children:
+                _raise_if_stopped(stop_event)
+                if _is_excluded(child, lib_path):
+                    continue
+                if is_directory:
+                    directories.append(child)
+                elif is_file and child.suffix.lower() == ".mkv":
+                    mkv_by_parent[child.parent].append(child)
+            await _cooperative_checkpoint(stop_event)
+
+        for parent in sorted(mkv_by_parent):
+            _raise_if_stopped(stop_event)
+            parent_mkv_files = mkv_by_parent[parent]
+            sibling_entries = entries_by_parent.get(parent, ())
+
+            # Check every sibling explicitly.  This deliberately avoids a
+            # comprehension that could traverse a large directory without
+            # giving Stop a chance to run.
+            ass_files: list[Path] = []
+            for child, is_directory, is_file in sibling_entries:
+                _raise_if_stopped(stop_event)
+                if is_directory and child.name.lower() == "fonts":
+                    resolved_child = child.resolve()
+                    if not _is_excluded(resolved_child, lib_path):
+                        font_dirs.add(resolved_child)
+                elif is_file and child.suffix.lower() == ".ass":
+                    ass_files.append(child)
+            await _cooperative_checkpoint(stop_event)
 
             # 1st Pass: Match by exact name or extracted episode number
             mkv_by_info: dict[tuple[int, int], Path] = {}
             for mkv in parent_mkv_files:
+                _raise_if_stopped(stop_event)
                 info = get_info(mkv.name)
                 if info:
                     mkv_by_info[info] = mkv
+            await _cooperative_checkpoint(stop_event)
 
             matched_ass: set[Path] = set()
             matched_mkv: set[Path] = set()
 
             # First, check if exact name match works (fast path and highest priority)
             for mkv in parent_mkv_files:
+                _raise_if_stopped(stop_event)
                 mkv_stem = mkv.stem.lower()
                 for ass in ass_files:
+                    _raise_if_stopped(stop_event)
                     if ass not in matched_ass and ass.stem.lower() == mkv_stem:
                         anime_title = parent.name if parent.name else "Unknown"
                         results.append(
@@ -387,9 +456,11 @@ class LibraryScanner:
                             anime_title=anime_title,
                         )
                         break
+                await _cooperative_checkpoint(stop_event)
 
             # Next, match by extracted episode number for unmatched files
             for ass in ass_files:
+                _raise_if_stopped(stop_event)
                 if ass in matched_ass:
                     continue
                 info = get_info(ass.name)
@@ -413,15 +484,18 @@ class LibraryScanner:
                             subtitle=ass.name,
                             anime_title=anime_title,
                         )
+                await _cooperative_checkpoint(stop_event)
 
             # 2nd Pass: Fuzzy matching for the leftovers
             for mkv in parent_mkv_files:
+                _raise_if_stopped(stop_event)
                 if mkv in matched_mkv:
                     continue
                 sig_v = signature(mkv.stem)
                 best_ass = None
                 best_r = 0.0
                 for ass in ass_files:
+                    _raise_if_stopped(stop_event)
                     if ass in matched_ass:
                         continue
                     r = SequenceMatcher(None, sig_v, signature(ass.stem)).ratio()
@@ -447,15 +521,18 @@ class LibraryScanner:
                         subtitle=best_ass.name,
                         anime_title=anime_title,
                     )
+                await _cooperative_checkpoint(stop_event)
 
             # Collect unmatched MKVs for Phase 2 embedded detection
             for mkv in parent_mkv_files:
+                _raise_if_stopped(stop_event)
                 if mkv not in matched_mkv:
                     anime_title = parent.name if parent.name else "Unknown"
                     unmatched_mkvs.append((mkv.resolve(), anime_title))
                     logger.debug(
                         "no matching ASS subtitle sibling for MKV", mkv=mkv.name
                     )
+            await _cooperative_checkpoint(stop_event)
 
         return results, font_dirs, unmatched_mkvs
 
@@ -463,6 +540,7 @@ class LibraryScanner:
         self,
         unmatched_mkvs: list[tuple[Path, str]],
         lib_path: Path,
+        stop_event: asyncio.Event | None = None,
     ) -> list[LibraryScanResult]:
         """Detect embedded ASS subtitle tracks in unmatched MKVs via mkvmerge -J.
 
@@ -472,51 +550,115 @@ class LibraryScanner:
         mkvmerge = self._mkvmerge
         assert mkvmerge is not None
 
+        _raise_if_stopped(stop_event)
         results: list[LibraryScanResult] = []
-        semaphore = asyncio.Semaphore(4)
 
         async def _detect_one(
             mkv_path: Path, anime_title: str
         ) -> LibraryScanResult | None:
-            async with semaphore:
-                try:
-                    identify_result = await mkvmerge.identify(mkv_path)
-                except Exception as e:
-                    logger.warning(
-                        "mkvmerge identify failed for embedded sub detection",
-                        mkv=mkv_path.name,
-                        error=str(e),
-                    )
-                    return None
-
-                embedded_info = _parse_embedded_info(identify_result)
-                if embedded_info is None:
-                    logger.debug(
-                        "no embedded ASS tracks found",
-                        mkv=mkv_path.name,
-                    )
-                    return None
-
-                logger.info(
-                    "discovered embedded ASS subtitle tracks",
+            _raise_if_stopped(stop_event)
+            try:
+                identify_result = await mkvmerge.identify(mkv_path)
+            except asyncio.CancelledError:
+                raise
+            except PipelineStoppedError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "mkvmerge identify failed for embedded sub detection",
                     mkv=mkv_path.name,
-                    track_count=embedded_info.track_count,
-                    languages=embedded_info.languages,
-                    has_embedded_fonts=embedded_info.has_embedded_fonts,
+                    error=str(e),
                 )
-                return LibraryScanResult(
-                    episode_path=mkv_path,
-                    subtitle_path=None,
-                    subtitle_source=SubtitleSource.EMBEDDED,
-                    anime_title=anime_title,
-                    embedded_sub_info=embedded_info,
+                return None
+
+            _raise_if_stopped(stop_event)
+            embedded_info = _parse_embedded_info(identify_result)
+            if embedded_info is None:
+                logger.debug(
+                    "no embedded ASS tracks found",
+                    mkv=mkv_path.name,
                 )
+                return None
 
-        tasks = [_detect_one(mkv, title) for mkv, title in unmatched_mkvs]
-        detection_results = await asyncio.gather(*tasks)
+            logger.info(
+                "discovered embedded ASS subtitle tracks",
+                mkv=mkv_path.name,
+                track_count=embedded_info.track_count,
+                languages=embedded_info.languages,
+                has_embedded_fonts=embedded_info.has_embedded_fonts,
+            )
+            return LibraryScanResult(
+                episode_path=mkv_path,
+                subtitle_path=None,
+                subtitle_source=SubtitleSource.EMBEDDED,
+                anime_title=anime_title,
+                embedded_sub_info=embedded_info,
+            )
 
-        for result in detection_results:
-            if result is not None:
-                results.append(result)
+        pending: set[asyncio.Task[LibraryScanResult | None]] = set()
+        candidates = iter(unmatched_mkvs)
+
+        async def _drain_owned_tasks(*, cancel: bool) -> None:
+            """Consume every task this invocation owns before returning."""
+            if cancel:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        def _schedule_next() -> bool:
+            _raise_if_stopped(stop_event)
+            try:
+                mkv_path, anime_title = next(candidates)
+            except StopIteration:
+                return False
+            pending.add(asyncio.create_task(_detect_one(mkv_path, anime_title)))
+            return True
+
+        try:
+            for _ in range(min(4, len(unmatched_mkvs))):
+                _schedule_next()
+
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                stopped = stop_event is not None and stop_event.is_set()
+                native_cancelled = False
+                for task in done:
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        # Consume every completed task before propagating native
+                        # cancellation; otherwise a sibling exception can be
+                        # left un-retrieved.
+                        native_cancelled = True
+                    except PipelineStoppedError:
+                        stopped = True
+                    else:
+                        if result is not None:
+                            results.append(result)
+
+                if native_cancelled:
+                    raise asyncio.CancelledError
+
+                if stopped:
+                    # A user Stop never cancels in-flight binary work.  Wait
+                    # for every owned task, discard their results, and return a
+                    # neutral stopped outcome.
+                    await _drain_owned_tasks(cancel=False)
+                    raise PipelineStoppedError("Library scan stopped by user")
+
+                while len(pending) < 4 and _schedule_next():
+                    pass
+        except asyncio.CancelledError:
+            # Native cancellation does cancel owned tasks, then consumes every
+            # outcome so no task exception is left un-retrieved.
+            await _drain_owned_tasks(cancel=True)
+            raise
+        except PipelineStoppedError:
+            await _drain_owned_tasks(cancel=False)
+            raise
 
         return results

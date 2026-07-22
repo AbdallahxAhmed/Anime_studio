@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from datetime import datetime, timezone
 from os.path import normcase
 import time
@@ -21,9 +22,15 @@ from src.ports.subprocess import SubprocessPort
 from src.ports.filesystem import FilesystemPort
 from src.adapters.dependency_checker import ToolRegistry
 from src.config import AppConfig
-from src.errors import FontMatchError
+from src.errors import FontMatchError, PipelineStoppedError
 
 logger = structlog.get_logger()
+
+
+def _raise_if_stopped(stop_event: asyncio.Event | None) -> None:
+    """Stop a pipeline run without representing user intent as a failure."""
+    if stop_event is not None and stop_event.is_set():
+        raise PipelineStoppedError("Pipeline stopped by user")
 
 
 def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
@@ -37,6 +44,69 @@ def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
 def _normalized_path_key(path: Path) -> str:
     """Return a resolved, platform-normalized key for exact path identity."""
     return normcase(str(Path(path).expanduser().resolve()))
+
+
+def _list_directory_entries(directory: Path) -> tuple[tuple[Path, bool, bool], ...]:
+    """List one directory without reading cancellation state in a worker."""
+    entries: list[tuple[Path, bool, bool]] = []
+    for child in sorted(directory.iterdir(), key=lambda path: path.name.casefold()):
+        try:
+            entries.append((child, child.is_dir(), child.is_file()))
+        except OSError:
+            continue
+    return tuple(entries)
+
+
+async def _enumerate_mkvs(
+    discovery_root: Path, stop_event: asyncio.Event | None
+) -> list[Path]:
+    """Return MKVs through bounded, event-loop-cooperative traversal."""
+    pending_directories: deque[Path] = deque([discovery_root])
+    mkv_paths: list[Path] = []
+
+    while pending_directories:
+        _raise_if_stopped(stop_event)
+        directory = pending_directories.popleft()
+        try:
+            entries = await asyncio.to_thread(_list_directory_entries, directory)
+        except OSError as error:
+            logger.warning(
+                "failed to list directory during skipped-MKV enumeration",
+                directory=str(directory),
+                error=str(error),
+            )
+            continue
+        _raise_if_stopped(stop_event)
+
+        for path, is_directory, is_file in entries:
+            _raise_if_stopped(stop_event)
+            if is_directory:
+                pending_directories.append(path)
+            elif is_file and path.suffix.lower() == ".mkv":
+                mkv_paths.append(path)
+
+        # This is a cooperative event-loop checkpoint, not a timing delay.
+        await asyncio.sleep(0)
+        _raise_if_stopped(stop_event)
+
+    return sorted(mkv_paths, key=lambda path: (path.name.casefold(), str(path)))
+
+
+async def _filter_selected_scans(
+    scan_results: list[LibraryScanResult],
+    selected_keys: set[str],
+    stop_event: asyncio.Event | None,
+) -> list[LibraryScanResult]:
+    """Apply exact full-path selection without starving the event loop."""
+    selected: list[LibraryScanResult] = []
+    for index, scan in enumerate(scan_results, start=1):
+        _raise_if_stopped(stop_event)
+        if _normalized_path_key(scan.episode_path) in selected_keys:
+            selected.append(scan)
+        if index % 32 == 0:
+            await asyncio.sleep(0)
+            _raise_if_stopped(stop_event)
+    return selected
 
 
 class PipelineRunner:
@@ -80,20 +150,32 @@ class PipelineRunner:
             .expanduser()
             .resolve()
         )
+        run_font_resolver = self.font_resolver.for_run(
+            effective_discovery_root, stop_event
+        )
 
         # 1. Scan Library
+        _raise_if_stopped(stop_event)
         logger.info(
             "Library scan started",
             stage="scan",
             progress_current=None,
             progress_total=None,
         )
-        scan_output = await self.library_scanner.scan(effective_discovery_root)
+        if stop_event is None:
+            scan_output = await self.library_scanner.scan(effective_discovery_root)
+        else:
+            scan_output = await self.library_scanner.scan(
+                effective_discovery_root, stop_event=stop_event
+            )
+        _raise_if_stopped(stop_event)
         scan_results = scan_output.episodes
 
         completed_from_checkpoint = set()
         if checkpoint_manager:
+            _raise_if_stopped(stop_event)
             checkpoint = await checkpoint_manager.load()
+            _raise_if_stopped(stop_event)
             if (
                 checkpoint
                 and Path(checkpoint.library_path).resolve()
@@ -112,15 +194,15 @@ class PipelineRunner:
             ]
 
         if pipeline_config.selected_paths is not None:
+            _raise_if_stopped(stop_event)
             selected_keys = {
                 _normalized_path_key(path) for path in pipeline_config.selected_paths
             }
             original_count = len(scan_results)
-            scan_results = [
-                ep
-                for ep in scan_results
-                if _normalized_path_key(ep.episode_path) in selected_keys
-            ]
+            scan_results = await _filter_selected_scans(
+                scan_results, selected_keys, stop_event
+            )
+            _raise_if_stopped(stop_event)
             logger.info(
                 "Filtered episodes by selected paths",
                 selected_count=len(scan_results),
@@ -128,6 +210,7 @@ class PipelineRunner:
                 selected_paths_count=len(selected_keys),
             )
 
+        _raise_if_stopped(stop_event)
         font_dirs = scan_output.font_directories
         logger.info(
             f"Library scan complete. Found {len(scan_results)} episodes.",
@@ -137,6 +220,7 @@ class PipelineRunner:
         )
 
         # Pre-pipeline font ingestion step
+        _raise_if_stopped(stop_event)
         if font_dirs:
             logger.info(
                 "Auto-discovered font directories, starting ingestion",
@@ -145,6 +229,7 @@ class PipelineRunner:
             await self.font_ingestion_service.ingest_directories(
                 font_dirs, source="auto_discovery"
             )
+        _raise_if_stopped(stop_event)
 
         # Resolve anime_title
         anime_title = pipeline_config.anime_title
@@ -165,19 +250,22 @@ class PipelineRunner:
                 genuine_misses=[],
             )
             # Write empty report
+            _raise_if_stopped(stop_event)
             report_md = render_report(report)
             report_path = Path(pipeline_config.library_path) / "_AnimeStudio_Report.md"
+            _raise_if_stopped(stop_event)
             await self.filesystem.write_file_atomic(report_path, report_md)
+            _raise_if_stopped(stop_event)
             return report
 
         # Find skipped episodes (MKVs without matching ASS)
-        all_mkvs = sorted(
-            list(effective_discovery_root.rglob("*.mkv")),
-            key=lambda p: p.name,
-        )
+        _raise_if_stopped(stop_event)
+        all_mkvs = await _enumerate_mkvs(effective_discovery_root, stop_event)
+        _raise_if_stopped(stop_event)
         scanned_mkv_paths = {Path(s.episode_path).resolve() for s in scan_results}
         skipped_reports = []
         for mkv in all_mkvs:
+            _raise_if_stopped(stop_event)
             if mkv.resolve() not in scanned_mkv_paths:
                 skipped_reports.append(
                     EpisodeReport(
@@ -192,6 +280,7 @@ class PipelineRunner:
         external_scans = []
         embedded_only_reports = []
         for scan in scan_results:
+            _raise_if_stopped(stop_event)
             if scan.subtitle_source == SubtitleSource.EMBEDDED:
                 logger.info(
                     "skipping embedded-only episode (no external subtitle to process)",
@@ -210,17 +299,20 @@ class PipelineRunner:
                 external_scans.append(scan)
 
         episode_contexts = []
-        stopped_scans = []
-        for i, scan in enumerate(external_scans):
-            if stop_event and stop_event.is_set():
-                logger.info("Pipeline stopped by user")
-                stopped_scans = external_scans[i:]
-                break
+        for scan in external_scans:
+            _raise_if_stopped(stop_event)
             ctx = await self._analyze_episode(
-                scan, anime_title, pipeline_config, run_timestamp
+                scan,
+                anime_title,
+                pipeline_config,
+                run_timestamp,
+                stop_event=stop_event,
+                font_resolver=run_font_resolver,
             )
+            _raise_if_stopped(stop_event)
             episode_contexts.append(ctx)
             if checkpoint_manager:
+                _raise_if_stopped(stop_event)
                 from src.models.run_manifest import PipelineCheckpoint
 
                 completed_list = list(completed_from_checkpoint) + [
@@ -235,6 +327,7 @@ class PipelineRunner:
                     ),
                 )
                 await checkpoint_manager.save(checkpoint)
+                _raise_if_stopped(stop_event)
 
         # 3. Concurrent Mux Concurrency Semaphore
         mux_semaphore = self.disk_semaphore
@@ -245,6 +338,7 @@ class PipelineRunner:
         # Helper to run mux and post-process
         async def _mux_and_post_process(ctx: EpisodeContext) -> EpisodeContext:
             nonlocal completed_mux_count
+            _raise_if_stopped(stop_event)
             if ctx.status == EpisodeStatus.FAILED:
                 # Still increment progress for already failed ones if we are counting them,
                 # but they are excluded from the concurrent mux list.
@@ -260,6 +354,7 @@ class PipelineRunner:
                 )
 
             async with mux_semaphore:
+                _raise_if_stopped(stop_event)
                 logger.info(
                     f"Muxing episode: {ctx.scan_result.episode_path.name}",
                     stage="mux",
@@ -285,6 +380,7 @@ class PipelineRunner:
                             ctx.mux_job, timeout=float(self.config.mux_timeout_s)
                         )
 
+                    _raise_if_stopped(stop_event)
                     if not mux_res.success:
                         return ctx.model_copy(
                             update={
@@ -317,15 +413,19 @@ class PipelineRunner:
                         # Perform trash moves
                         sub_path = ctx.scan_result.subtitle_path
                         assert sub_path is not None
+                        _raise_if_stopped(stop_event)
                         await self.filesystem.move_to_trash(sub_path, sub_trash)
+                        _raise_if_stopped(stop_event)
                         await self.filesystem.move_to_trash(
                             ctx.scan_result.episode_path, mkv_trash
                         )
+                        _raise_if_stopped(stop_event)
                         # Atomic replace original MKV with temporary muxed file
                         assert ctx.mux_job is not None
                         await self.filesystem.replace_file(
                             ctx.mux_job.output_path, ctx.scan_result.episode_path
                         )
+                        _raise_if_stopped(stop_event)
                         # Cleanup temp ASS file if exists
                         temp_sub_path = sub_path.with_name(f"{sub_path.stem}.tmp.ass")
                         if temp_sub_path.exists():
@@ -364,6 +464,8 @@ class PipelineRunner:
                     )
                     return res_ctx
 
+                except (PipelineStoppedError, asyncio.CancelledError):
+                    raise
                 except Exception as e:
                     logger.error(
                         "muxing or post-processing failed",
@@ -386,12 +488,79 @@ class PipelineRunner:
                         }
                     )
 
-        if stop_event and stop_event.is_set():
-            final_contexts = list(episode_contexts)
-        else:
-            # Dispatch mux operations concurrently
-            mux_tasks = [_mux_and_post_process(ctx) for ctx in episode_contexts]
-            final_contexts = await asyncio.gather(*mux_tasks)
+        _raise_if_stopped(stop_event)
+        # Keep only a bounded number of owned mux tasks.  The shared disk
+        # semaphore remains the cross-run I/O guard; this scheduler also avoids
+        # creating one task per episode for a large library.
+        max_unfinished_mux_tasks = max(1, self.config.max_concurrent_disk_io)
+        pending_mux_tasks: set[asyncio.Future[EpisodeContext]] = set()
+        remaining_contexts = iter(episode_contexts)
+        final_contexts: list[EpisodeContext] = []
+
+        async def _drain_owned_mux_tasks(*, cancel: bool) -> None:
+            if cancel:
+                for task in pending_mux_tasks:
+                    if not task.done():
+                        task.cancel()
+            if pending_mux_tasks:
+                await asyncio.gather(*pending_mux_tasks, return_exceptions=True)
+
+        def _schedule_next_mux() -> bool:
+            _raise_if_stopped(stop_event)
+            try:
+                context = next(remaining_contexts)
+            except StopIteration:
+                return False
+            pending_mux_tasks.add(asyncio.create_task(_mux_and_post_process(context)))
+            return True
+
+        try:
+            while (
+                len(pending_mux_tasks) < max_unfinished_mux_tasks
+                and _schedule_next_mux()
+            ):
+                pass
+
+            while pending_mux_tasks:
+                done, pending_mux_tasks = await asyncio.wait(
+                    pending_mux_tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                stopped = stop_event is not None and stop_event.is_set()
+                native_cancelled = False
+                for task in done:
+                    try:
+                        final_contexts.append(task.result())
+                    except asyncio.CancelledError:
+                        # Read every completed task before escalating native
+                        # cancellation so a sibling exception is never lost.
+                        native_cancelled = True
+                    except PipelineStoppedError:
+                        stopped = True
+
+                if native_cancelled:
+                    raise asyncio.CancelledError
+
+                if stopped:
+                    # Do not cancel user-owned binary work; let started muxes
+                    # finish, consume their outcomes, and discard them.
+                    await _drain_owned_mux_tasks(cancel=False)
+                    raise PipelineStoppedError("Pipeline stopped by user")
+
+                while (
+                    len(pending_mux_tasks) < max_unfinished_mux_tasks
+                    and _schedule_next_mux()
+                ):
+                    pass
+        except asyncio.CancelledError:
+            await _drain_owned_mux_tasks(cancel=True)
+            raise
+        except PipelineStoppedError:
+            await _drain_owned_mux_tasks(cancel=False)
+            raise
+        except Exception:
+            await _drain_owned_mux_tasks(cancel=True)
+            raise
+        _raise_if_stopped(stop_event)
 
         # Build reports list
         episode_reports = []
@@ -404,14 +573,6 @@ class PipelineRunner:
                     mux_result=ctx.mux_result,
                     missing_fonts=ctx.missing_fonts,
                     applied_rules=ctx.errors,  # Store errors/applied rules context
-                )
-            )
-
-        for scan in stopped_scans:
-            episode_reports.append(
-                EpisodeReport(
-                    episode_path=scan.episode_path,
-                    status=EpisodeStatus.SKIPPED,
                 )
             )
 
@@ -437,6 +598,7 @@ class PipelineRunner:
         )
 
         # Write or append report
+        _raise_if_stopped(stop_event)
         report_path = Path(pipeline_config.library_path) / "_AnimeStudio_Report.md"
 
         # Decide full vs incremental write
@@ -470,21 +632,33 @@ class PipelineRunner:
 
             try:
                 existing_content = await asyncio.to_thread(_read_report)
+                _raise_if_stopped(stop_event)
                 incremental_section = render_incremental_section(report)
                 new_content = f"{existing_content}\n{incremental_section}"
+                _raise_if_stopped(stop_event)
                 await self.filesystem.write_file_atomic(report_path, new_content)
+                _raise_if_stopped(stop_event)
+            except PipelineStoppedError:
+                raise
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(
                     "failed to append to existing report, overwriting instead",
                     error=str(e),
                 )
                 report_md = render_report(report)
+                _raise_if_stopped(stop_event)
                 await self.filesystem.write_file_atomic(report_path, report_md)
+                _raise_if_stopped(stop_event)
         else:
             report_md = render_report(report)
+            _raise_if_stopped(stop_event)
             await self.filesystem.write_file_atomic(report_path, report_md)
+            _raise_if_stopped(stop_event)
 
         # Write RunManifest on completion (normal or stopped)
+        _raise_if_stopped(stop_event)
         if undo_service and final_contexts:
             from src.models.run_manifest import RunManifest, EpisodeProcessed
 
@@ -515,12 +689,17 @@ class PipelineRunner:
                 library_path=str(pipeline_config.library_path),
                 episodes_processed=tuple(manifest_episodes),
             )
+            _raise_if_stopped(stop_event)
             await undo_service.save_manifest(manifest)
+            _raise_if_stopped(stop_event)
 
         # Clear checkpoint on normal (not stopped) completion
-        if checkpoint_manager and not (stop_event and stop_event.is_set()):
+        _raise_if_stopped(stop_event)
+        if checkpoint_manager:
             await checkpoint_manager.clear()
+            _raise_if_stopped(stop_event)
 
+        _raise_if_stopped(stop_event)
         logger.info(
             "Pipeline completed successfully",
             stage="done",
@@ -535,8 +714,12 @@ class PipelineRunner:
         anime_title: str,
         pipeline_config: PipelineConfig,
         run_timestamp: datetime,
+        *,
+        stop_event: asyncio.Event | None = None,
+        font_resolver: FontResolver | None = None,
     ) -> EpisodeContext:
         """Run sequential timing repair, timing sync fallback, font extraction, font resolution, and mux planning for one episode."""
+        _raise_if_stopped(stop_event)
         ctx = EpisodeContext(scan_result=scan, status=EpisodeStatus.FAILED)
         if scan.subtitle_path is None:
             return ctx.model_copy(
@@ -547,15 +730,22 @@ class PipelineRunner:
             )
 
         async with self._analysis_lock:
+            _raise_if_stopped(stop_event)
             # 1. Timing check/repair
             try:
-                repaired_content = repair_ass(scan.subtitle_path)
+                _raise_if_stopped(stop_event)
+                repaired_content = await asyncio.to_thread(
+                    repair_ass, scan.subtitle_path
+                )
+                _raise_if_stopped(stop_event)
                 ctx = ctx.model_copy(
                     update={
                         "repaired_content": repaired_content,
                         "status": EpisodeStatus.COMPLETE,  # temporarily COMPLETE until we check other things
                     }
                 )
+            except (PipelineStoppedError, asyncio.CancelledError):
+                raise
             except Exception as e:
                 logger.error(
                     "subtitle repair failed",
@@ -574,13 +764,20 @@ class PipelineRunner:
                 f"{scan.subtitle_path.stem}.tmp.ass"
             )
             if not pipeline_config.dry_run:
+                _raise_if_stopped(stop_event)
                 await self.filesystem.write_file_atomic(temp_sub_path, repaired_content)
+                _raise_if_stopped(stop_event)
 
             # 2. Timing Sync Fallback Chain
             if pipeline_config.sync_enabled:
+                _raise_if_stopped(stop_event)
                 sync_res = await self._sync_subtitle(
-                    scan.episode_path, temp_sub_path, temp_sub_path
+                    scan.episode_path,
+                    temp_sub_path,
+                    temp_sub_path,
+                    stop_event=stop_event,
                 )
+                _raise_if_stopped(stop_event)
                 ctx = ctx.model_copy(update={"sync_result": sync_res})
                 if not sync_res.success:
                     # Sync failed, log error but do not halt, leave repaired subtitle intact
@@ -602,28 +799,39 @@ class PipelineRunner:
                                 return f.read()
 
                         try:
+                            _raise_if_stopped(stop_event)
                             synced_content = await asyncio.to_thread(_read_synced)
+                            _raise_if_stopped(stop_event)
                             ctx = ctx.model_copy(
                                 update={"repaired_content": synced_content}
                             )
+                        except (PipelineStoppedError, asyncio.CancelledError):
+                            raise
                         except Exception as e:
                             logger.error(
                                 "failed to read synced subtitle content", error=str(e)
                             )
 
             # 3. Font Extraction
+            _raise_if_stopped(stop_event)
             font_queries = extract_fonts(
                 ctx.repaired_content or "", scan.episode_path, anime_title
             )
+            _raise_if_stopped(stop_event)
             ctx = ctx.model_copy(update={"font_queries": font_queries})
 
             # 4. Font Resolution (Sequential)
             resolved_fonts = []
             missing_fonts = []
+            active_font_resolver = font_resolver or self.font_resolver
             for query in font_queries:
+                _raise_if_stopped(stop_event)
                 try:
-                    asset = await self.font_resolver.resolve(query)
+                    asset = await active_font_resolver.resolve(query)
+                    _raise_if_stopped(stop_event)
                     resolved_fonts.append(asset)
+                except (PipelineStoppedError, asyncio.CancelledError):
+                    raise
                 except FontMatchError as e:
                     logger.warning(
                         "font resolution failed",
@@ -654,10 +862,12 @@ class PipelineRunner:
             )
 
             # 5. Plan Mux
+            _raise_if_stopped(stop_event)
             temp_mkv_path = scan.episode_path.with_name(
                 f"{scan.episode_path.stem}.tmp.mkv"
             )
             job = plan_mux(ctx, temp_mkv_path, dry_run=pipeline_config.dry_run)
+            _raise_if_stopped(stop_event)
             ctx = ctx.model_copy(update={"mux_job": job})
 
             return ctx
@@ -667,8 +877,11 @@ class PipelineRunner:
         reference_mkv: Path,
         subtitle_ass: Path,
         output_ass: Path,
+        *,
+        stop_event: asyncio.Event | None = None,
     ) -> SyncResult:
         """Sync subtitle_ass to reference_mkv audio, falling back from alass to ffsubsync."""
+        _raise_if_stopped(stop_event)
         duration_start = time.perf_counter()
 
         # Check if alass is available
@@ -685,12 +898,14 @@ class PipelineRunner:
                 "attempting subtitle sync via alass", subtitle=subtitle_ass.name
             )
             try:
+                _raise_if_stopped(stop_event)
                 res = await alass_adapter.sync(
                     reference_mkv,
                     subtitle_ass,
                     output_ass,
                     timeout=float(self.config.default_timeout_s),
                 )
+                _raise_if_stopped(stop_event)
                 duration_ms = (time.perf_counter() - duration_start) * 1000.0
                 if res.success:
                     offset = self._parse_offset(res.stdout or res.stderr)
@@ -705,6 +920,8 @@ class PipelineRunner:
                     logger.warning(
                         "alass sync failed, falling back to ffsubsync", error=res.stderr
                     )
+            except (PipelineStoppedError, asyncio.CancelledError):
+                raise
             except Exception as e:
                 logger.warning("alass execution encountered an exception", error=str(e))
 
@@ -714,6 +931,7 @@ class PipelineRunner:
             or shutil.which("ffsubsync") is not None
         )
         if ffsubsync_available:
+            _raise_if_stopped(stop_event)
             from src.adapters.ffsubsync import FfsubsyncAdapter
 
             ff_adapter = FfsubsyncAdapter(self.subprocess_adapter)
@@ -721,12 +939,14 @@ class PipelineRunner:
                 "attempting subtitle sync via ffsubsync", subtitle=subtitle_ass.name
             )
             try:
+                _raise_if_stopped(stop_event)
                 res = await ff_adapter.sync(
                     reference_mkv,
                     subtitle_ass,
                     output_ass,
                     timeout=float(self.config.default_timeout_s),
                 )
+                _raise_if_stopped(stop_event)
                 duration_ms = (time.perf_counter() - duration_start) * 1000.0
                 if res.success:
                     offset = self._parse_offset(res.stdout or res.stderr)
@@ -739,11 +959,14 @@ class PipelineRunner:
                     )
                 else:
                     logger.error("ffsubsync sync failed as well", error=res.stderr)
+            except (PipelineStoppedError, asyncio.CancelledError):
+                raise
             except Exception as e:
                 logger.error(
                     "ffsubsync execution encountered an exception", error=str(e)
                 )
 
+        _raise_if_stopped(stop_event)
         duration_ms = (time.perf_counter() - duration_start) * 1000.0
         # Both failed or both unavailable
         return SyncResult(

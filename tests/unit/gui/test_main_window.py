@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 from typing import Any
 import pytest
 import asyncio
@@ -6,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
+from src.errors import PipelineStoppedError
 from src.gui.main_window import MainWindow
 from src.models.report import PipelineReport
 from src.models.pipeline import (
@@ -202,7 +204,9 @@ async def test_main_window_import_button_and_dialog_trigger(
     )
 
     assert window.settings_btn is not None
-    assert window.settings_btn.text() == "⚙ Settings"
+    assert window.settings_btn.text() == "Import Fonts"
+    assert window.settings_btn.toolTip() == "Import local fonts from a folder"
+    assert window.settings_btn.accessibleName() == "Import fonts"
 
     mocker.patch(
         "PySide6.QtWidgets.QFileDialog.getExistingDirectory",
@@ -240,7 +244,7 @@ def test_main_window_drag_enter_event_valid(mocker, tmp_path: Path) -> None:
     window.dragEnterEvent(event)
 
     event.acceptProposedAction.assert_called_once()
-    assert "border: 3px solid" in window.styleSheet()
+    assert "border: 2px solid #3B82F6" in window.styleSheet()
 
 
 def test_main_window_drag_enter_event_invalid(mocker, tmp_path: Path) -> None:
@@ -275,7 +279,14 @@ async def test_main_window_drop_event_dispatch(mocker, tmp_path: Path) -> None:
     log_bridge = MockLogBridge()
     config = MockConfig(tmp_path)
     mock_ingestion = mocker.MagicMock()
-    mock_ingestion.ingest_files = mocker.AsyncMock()
+    ingestion_started = asyncio.Event()
+
+    async def ingest_files(files: list[Path], *, source: str) -> None:
+        assert files == [Path("tests/fixtures/fonts/valid.ttf")]
+        assert source == "drag_drop"
+        ingestion_started.set()
+
+    mock_ingestion.ingest_files = mocker.AsyncMock(side_effect=ingest_files)
     mock_index = MockIndexManager(tmp_path)
 
     window = MainWindow(
@@ -294,8 +305,7 @@ async def test_main_window_drop_event_dispatch(mocker, tmp_path: Path) -> None:
     window.dropEvent(event)
 
     event.acceptProposedAction.assert_called_once()
-
-    await asyncio.sleep(0.05)
+    await ingestion_started.wait()
 
     mock_ingestion.ingest_files.assert_called_once_with(
         [Path("tests/fixtures/fonts/valid.ttf")], source="drag_drop"
@@ -714,6 +724,66 @@ def test_main_window_stop_button_sets_stop_event(mocker, tmp_path: Path) -> None
     assert window.stop_button.isEnabled() is False
 
 
+def test_main_window_keyboard_and_accessibility_surface(
+    qtbot, mocker, tmp_path: Path
+) -> None:
+    """Primary controls remain textual, discoverable, and keyboard reachable."""
+    long_library_path = tmp_path / (("Long Library العربية 日本語 " * 12).strip())
+    window = MainWindow(
+        pipeline_runner=mocker.MagicMock(),
+        log_bridge=MockLogBridge(),
+        config=MockConfig(long_library_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+    qtbot.addWidget(window)
+    window.resize(800, 600)
+    window.show()
+
+    assert window.accessibleName() == "Anime Studio desktop application"
+    assert window.settings_btn.text() == "Import Fonts"
+    assert window.settings_btn.accessibleName() == "Import fonts"
+    assert window.run_button.accessibleName() == "Run 0 selected episodes"
+    assert window.stop_button.accessibleName() == "Stop pipeline"
+    assert window.empty_state_label.isVisible()
+    assert window.library_path_label.toolTip() == str(long_library_path)
+    assert window.library_path_label.accessibleDescription() == str(long_library_path)
+
+    focus_chain = []
+    current = window.settings_btn
+    for _ in range(20):
+        current = current.nextInFocusChain()
+        focus_chain.append(current)
+    assert window._sidebar._list_widget in focus_chain
+    assert focus_chain.index(window._sidebar._list_widget) < focus_chain.index(
+        window.undo_button
+    )
+
+
+def test_main_window_escape_requests_cooperative_stop(
+    qtbot, mocker, tmp_path: Path
+) -> None:
+    """Escape requests the same neutral Stop flow rather than a forced close."""
+    window = MainWindow(
+        pipeline_runner=mocker.MagicMock(),
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+    qtbot.addWidget(window)
+    window.show()
+    window._pipeline_running = True
+    window._stop_event = asyncio.Event()
+    window.stop_button.setVisible(True)
+
+    qtbot.keyClick(window, Qt.Key.Key_Escape)
+
+    assert window._stop_event.is_set()
+    assert window.stop_button.text() == "Stopping..."
+    assert window.stop_button.accessibleName() == "Stopping pipeline"
+
+
 @pytest.mark.asyncio
 async def test_main_window_undo_button_opens_dialog(mocker, tmp_path: Path) -> None:
     """FR-014: Undo button queries UndoService and opens UndoDialog."""
@@ -885,6 +955,201 @@ async def test_main_window_mid_execution_ui_locking_failure_cleanup(
     assert window.undo_button.isEnabled() is True
     assert window.settings_btn.isEnabled() is True
     assert window._pipeline_running is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_stop_is_neutral_and_restores_pre_run_status(
+    mocker, tmp_path: Path
+) -> None:
+    """User Stop is neither a successful run nor a pipeline failure."""
+    from src.errors import PipelineStoppedError
+
+    started = asyncio.Event()
+    status_updates: list[tuple[Path, ShowStatus]] = []
+
+    async def stopped_run(*_args: object, **kwargs: object) -> PipelineReport:
+        stop_event = kwargs["stop_event"]
+        assert isinstance(stop_event, asyncio.Event)
+        started.set()
+        await stop_event.wait()
+        raise PipelineStoppedError("Pipeline stopped by user")
+
+    async def update_status(path: Path, status: ShowStatus) -> None:
+        status_updates.append((path, status))
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock(side_effect=stopped_run)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
+    error_dialog = mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    show_path = tmp_path / "Stopped Show"
+    _set_active_show(window, show_path, "Stopped Show")
+    window._sidebar.add_show(
+        ShowSummary(
+            name="Stopped Show",
+            path=show_path.resolve(),
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="1 episode found",
+        )
+    )
+
+    run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await started.wait()
+    window._on_stop_click()
+    window._on_stop_click()
+    await run_task
+
+    assert error_dialog.call_count == 0
+    assert window.results_table.isVisible() is False
+    assert window.progress_panel.status_label.text() == "Pipeline stopped by user."
+    assert window.run_button.isEnabled() is True
+    assert window.stop_button.isVisible() is False
+    assert window._pipeline_running is False
+    assert status_updates == [
+        (show_path.resolve(), ShowStatus.PROCESSING),
+        (show_path.resolve(), ShowStatus.READY),
+    ]
+    assert window._sidebar.get_show_status(show_path.resolve()) is ShowStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_main_window_stop_restoration_failure_is_bounded_and_neutral(
+    mocker, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed status restore cannot escape the slot or become a run failure."""
+    started = asyncio.Event()
+    status_updates: list[tuple[Path, ShowStatus]] = []
+
+    async def stopped_run(*_args: object, **kwargs: object) -> PipelineReport:
+        stop_event = kwargs["stop_event"]
+        assert isinstance(stop_event, asyncio.Event)
+        started.set()
+        await stop_event.wait()
+        raise PipelineStoppedError("Pipeline stopped by user")
+
+    async def update_status(path: Path, status: ShowStatus) -> None:
+        status_updates.append((path, status))
+        if status is ShowStatus.READY:
+            raise OSError("index is unavailable")
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock(side_effect=stopped_run)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
+    error_dialog = mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    show_path = tmp_path / "Stopped Show"
+    _set_active_show(window, show_path, "Stopped Show")
+    window._sidebar.add_show(
+        ShowSummary(
+            name="Stopped Show",
+            path=show_path.resolve(),
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="1 episode found",
+        )
+    )
+    caplog.set_level(logging.WARNING, logger="anime_studio.gui.main_window")
+
+    run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await started.wait()
+    window._on_stop_click()
+    await run_task
+
+    assert error_dialog.call_count == 0
+    assert window.progress_panel.status_label.text() == "Pipeline stopped by user."
+    assert window.run_button.isEnabled()
+    assert status_updates == [
+        (show_path.resolve(), ShowStatus.PROCESSING),
+        (show_path.resolve(), ShowStatus.READY),
+    ]
+    restore_warnings = [
+        record
+        for record in caplog.records
+        if "Could not restore show status after user stop" in record.getMessage()
+    ]
+    assert len(restore_warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_main_window_treats_late_success_after_stop_as_neutral(
+    mocker, tmp_path: Path
+) -> None:
+    """A bounded runner operation finishing after Stop cannot render success."""
+    started = asyncio.Event()
+    status_updates: list[tuple[Path, ShowStatus]] = []
+    stopped_events: list[dict[str, object]] = []
+
+    async def late_success(*_args: object, **kwargs: object) -> PipelineReport:
+        stop_event = kwargs["stop_event"]
+        assert isinstance(stop_event, asyncio.Event)
+        started.set()
+        await stop_event.wait()
+        return PipelineReport(
+            run_timestamp=datetime.now(timezone.utc),
+            duration_ms=1.0,
+            anime_title="Stopped Show",
+            episodes=[],
+            total_fonts_found=0,
+            genuine_misses=[],
+        )
+
+    async def update_status(path: Path, status: ShowStatus) -> None:
+        status_updates.append((path, status))
+
+    mock_runner = mocker.MagicMock()
+    mock_runner.run = mocker.AsyncMock(side_effect=late_success)
+    mock_index = mocker.MagicMock(spec=MockIndexManager)
+    mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
+    window = MainWindow(
+        pipeline_runner=mock_runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=mock_index,
+    )
+    show_path = tmp_path / "Stopped Show"
+    _set_active_show(window, show_path, "Stopped Show")
+    window._sidebar.add_show(
+        ShowSummary(
+            name="Stopped Show",
+            path=show_path.resolve(),
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="1 episode found",
+        )
+    )
+    window.signal_bridge.log_received.connect(stopped_events.append)
+
+    run_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await started.wait()
+    window._on_stop_click()
+    await run_task
+
+    assert window.results_table.isVisible() is False
+    assert window.progress_panel.status_label.text() == "Pipeline stopped by user."
+    assert status_updates == [
+        (show_path.resolve(), ShowStatus.PROCESSING),
+        (show_path.resolve(), ShowStatus.READY),
+    ]
+    assert [event["event"] for event in stopped_events] == ["Pipeline stopped by user."]
 
 
 @pytest.mark.asyncio
@@ -1551,7 +1816,9 @@ async def test_main_window_run_snapshots_show_and_locks_navigation(
     assert window._sidebar._list_widget.isEnabled() is True
     assert window._sidebar._add_btn.isEnabled() is True
     assert window._sidebar.is_refresh_enabled() is True
-    assert runner_sidebar_statuses == [ShowStatus.PROCESSING]
+    # The original run is now stale, so its visible sidebar status must not
+    # overwrite the newly selected show state.
+    assert runner_sidebar_statuses == [ShowStatus.READY]
 
 
 @pytest.mark.asyncio
@@ -1705,9 +1972,12 @@ async def test_main_window_stale_run_does_not_update_newer_show_table(
     assert window._current_show_path == show_b
     assert window._show_name_label.text() == "Show B"
     assert (
-        window._episode_table._model.data(
-            window._episode_table._model.index(0, 3), Qt.ItemDataRole.DisplayRole
-        )
+        str(
+            window._episode_table._model.data(
+                window._episode_table._model.index(0, 3),
+                Qt.ItemDataRole.DisplayRole,
+            )
+        ).casefold()
         == "skipped"
     )
     visible_update.assert_not_called()

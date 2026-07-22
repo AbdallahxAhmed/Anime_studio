@@ -1,8 +1,11 @@
+import asyncio
+import threading
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 from src.core.library_scanner import LibraryScanner, _parse_embedded_info
+from src.errors import PipelineStoppedError
 from src.models.pipeline import LibraryScanOutput
 from src.models.subtitle import SubtitleSource
 
@@ -14,6 +17,208 @@ async def test_scan_library_empty(tmp_path):
     assert isinstance(results, LibraryScanOutput)
     assert len(results.episodes) == 0
     assert len(results.font_directories) == 0
+
+
+@pytest.mark.anyio
+async def test_scan_stops_before_filesystem_traversal(tmp_path):
+    """A pre-set stop signal produces no successful scan output or identify call."""
+    mkvmerge = AsyncMock()
+    scanner = LibraryScanner(mkvmerge=mkvmerge)
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    with pytest.raises(PipelineStoppedError):
+        await scanner.scan(tmp_path, stop_event=stop_event)
+
+    mkvmerge.identify.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_scan_stops_during_phase1_without_returning_partial_output(
+    tmp_path, monkeypatch
+):
+    """Phase 1 checks the stop signal between pairing units."""
+    show = tmp_path / "Show"
+    show.mkdir()
+    (show / "episode_01.mkv").touch()
+    (show / "episode_02.mkv").touch()
+    (show / "subtitle.ass").touch()
+    stop_event = asyncio.Event()
+
+    from src.core import library_scanner
+
+    original_get_info = library_scanner.get_info
+
+    def stop_after_first_info(filename: str):
+        stop_event.set()
+        return original_get_info(filename)
+
+    monkeypatch.setattr(library_scanner, "get_info", stop_after_first_info)
+
+    with pytest.raises(PipelineStoppedError):
+        await LibraryScanner().scan(tmp_path, stop_event=stop_event)
+
+
+@pytest.mark.anyio
+async def test_phase1_stop_is_processed_while_worker_lists_one_directory(
+    tmp_path, monkeypatch
+):
+    """Stop remains event-loop owned while one bounded filesystem call runs."""
+    show = tmp_path / "Show"
+    show.mkdir()
+    (show / "episode_01.mkv").touch()
+    (show / "episode_01.ass").touch()
+    stop_event = asyncio.Event()
+    listing_started = asyncio.Event()
+    release_listing = threading.Event()
+
+    from src.core import library_scanner
+
+    original_list = library_scanner._list_directory_entries
+    loop = asyncio.get_running_loop()
+
+    def controlled_list(directory: Path):
+        if directory == tmp_path:
+            loop.call_soon_threadsafe(listing_started.set)
+            release_listing.wait()
+        return original_list(directory)
+
+    monkeypatch.setattr(library_scanner, "_list_directory_entries", controlled_list)
+    scan_task = asyncio.create_task(
+        LibraryScanner().scan(tmp_path, stop_event=stop_event)
+    )
+    await listing_started.wait()
+    stop_event.set()
+    release_listing.set()
+
+    with pytest.raises(PipelineStoppedError):
+        await scan_task
+
+
+@pytest.mark.anyio
+async def test_phase1_stops_after_checked_ass_iteration_before_pairing(
+    tmp_path, monkeypatch
+):
+    """A large sibling set never becomes an unchecked ASS comprehension."""
+    show = tmp_path / "Show"
+    show.mkdir()
+    (show / "episode_01.mkv").touch()
+    for index in range(3):
+        (show / f"subtitle_{index:02d}.ass").touch()
+    stop_event = asyncio.Event()
+
+    from src.core import library_scanner
+
+    original_checkpoint = library_scanner._cooperative_checkpoint
+    checkpoints = 0
+
+    async def stop_after_sibling_iteration(event: asyncio.Event | None) -> None:
+        nonlocal checkpoints
+        checkpoints += 1
+        # Root walk, show walk, then sibling ASS iteration.
+        if checkpoints == 3:
+            stop_event.set()
+        await original_checkpoint(event)
+
+    original_get_info = library_scanner.get_info
+    get_info_calls = 0
+
+    def count_get_info(filename: str):
+        nonlocal get_info_calls
+        get_info_calls += 1
+        return original_get_info(filename)
+
+    monkeypatch.setattr(library_scanner, "get_info", count_get_info)
+    monkeypatch.setattr(
+        library_scanner, "_cooperative_checkpoint", stop_after_sibling_iteration
+    )
+
+    with pytest.raises(PipelineStoppedError):
+        await LibraryScanner().scan(tmp_path, stop_event=stop_event)
+
+    assert get_info_calls == 0
+
+
+@pytest.mark.anyio
+async def test_embedded_detection_stops_before_scheduling_later_batches():
+    """Running identifies finish naturally, while no post-stop unit is created."""
+    first_batch_started = asyncio.Event()
+    release_identifies = asyncio.Event()
+    started: list[Path] = []
+
+    async def identify(path: Path):
+        started.append(path)
+        if len(started) == 4:
+            first_batch_started.set()
+        await release_identifies.wait()
+        return {"tracks": [], "attachments": []}
+
+    mkvmerge = AsyncMock()
+    mkvmerge.identify.side_effect = identify
+    scanner = LibraryScanner(mkvmerge=mkvmerge)
+    stop_event = asyncio.Event()
+    candidates = [(Path(f"/library/{i}.mkv"), "Show") for i in range(5)]
+
+    phase2_task = asyncio.create_task(
+        scanner._phase2_embedded_detection(candidates, Path("/library"), stop_event)
+    )
+    await first_batch_started.wait()
+    stop_event.set()
+    release_identifies.set()
+
+    with pytest.raises(PipelineStoppedError):
+        await phase2_task
+
+    assert started == [Path(f"/library/{i}.mkv") for i in range(4)]
+
+
+@pytest.mark.anyio
+async def test_embedded_detection_reraises_neutral_stop_from_identify():
+    """A neutral stop from the binary boundary is never treated as a warning."""
+    mkvmerge = AsyncMock()
+    mkvmerge.identify.side_effect = PipelineStoppedError("identify stopped")
+    scanner = LibraryScanner(mkvmerge=mkvmerge)
+
+    with pytest.raises(PipelineStoppedError):
+        await scanner._phase2_embedded_detection(
+            [(Path("/library/episode.mkv"), "Show")], Path("/library")
+        )
+
+
+@pytest.mark.anyio
+async def test_embedded_detection_native_cancellation_cleans_all_owned_tasks():
+    """Native cancellation cancels and awaits every in-flight identify task."""
+    first_batch_started = asyncio.Event()
+    cancelled_paths: list[Path] = []
+    started: list[Path] = []
+    never_complete = asyncio.Event()
+
+    async def identify(path: Path):
+        started.append(path)
+        if len(started) == 4:
+            first_batch_started.set()
+        try:
+            await never_complete.wait()
+        except asyncio.CancelledError:
+            cancelled_paths.append(path)
+            raise
+        raise AssertionError("identify operation unexpectedly completed")
+
+    mkvmerge = AsyncMock()
+    mkvmerge.identify.side_effect = identify
+    scanner = LibraryScanner(mkvmerge=mkvmerge)
+    candidates = [(Path(f"/library/{index}.mkv"), "Show") for index in range(5)]
+    phase2_task = asyncio.create_task(
+        scanner._phase2_embedded_detection(candidates, Path("/library"))
+    )
+    await first_batch_started.wait()
+    phase2_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await phase2_task
+
+    assert started == [Path(f"/library/{index}.mkv") for index in range(4)]
+    assert set(cancelled_paths) == set(started)
 
 
 @pytest.mark.anyio

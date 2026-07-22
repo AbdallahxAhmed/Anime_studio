@@ -54,6 +54,7 @@ class ProgressStage(Enum):
     MUXING = "muxing"
     COMPLETE = "complete"
     ERROR = "error"
+    STOPPED = "stopped"
 
 
 @dataclass

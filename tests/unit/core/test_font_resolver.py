@@ -1,11 +1,15 @@
+import asyncio
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from src.core.font_resolver import FontResolver
 from src.hunters.registry import HunterRegistry
+from src.hunters.sources.mkv_extract import MkvExtractHunter
 from src.core.font_cache import FontCache
 from src.config import AppConfig
 from src.models.font import FontQuery, FontAsset, FontPayload, HunterResult
-from src.errors import FontMatchError
+from src.errors import FontMatchError, PipelineStoppedError
 from src.core.circuit_breaker import CircuitBreakerState
 
 
@@ -276,3 +280,68 @@ async def test_resolver_skips_download_for_non_cacheable_assets(
     # Verify download and store were NEVER called
     hunter.download.assert_not_called()
     mock_cache.store.assert_not_called()
+
+
+def test_resolver_for_run_clones_scoped_hunter_without_mutating_base(
+    registry, mock_cache, config, tmp_path: Path
+) -> None:
+    subprocess_port = AsyncMock()
+    base_mkv_hunter = MkvExtractHunter(subprocess_port)
+    regular_hunter = ConformingMockHunter("RegularHunter", priority=2)
+    registry.register(base_mkv_hunter)
+    registry.register(regular_hunter)
+    resolver = FontResolver(registry=registry, cache=mock_cache, config=config)
+
+    discovery_root = tmp_path / "Show A"
+    scoped_resolver = resolver.for_run(discovery_root)
+    scoped_hunters = list(scoped_resolver.registry.iter_hunters())
+    scoped_mkv_hunter = scoped_hunters[0]
+
+    assert scoped_resolver is not resolver
+    assert scoped_resolver.registry is not registry
+    assert isinstance(scoped_mkv_hunter, MkvExtractHunter)
+    assert scoped_mkv_hunter is not base_mkv_hunter
+    assert scoped_mkv_hunter.scope.discovery_root == discovery_root.resolve()
+    assert base_mkv_hunter.scope.discovery_root is None
+    assert scoped_hunters[1] is regular_hunter
+
+
+@pytest.mark.anyio
+async def test_resolver_reraises_stopped_hunter_without_tripping_circuit(
+    registry, mock_cache, config
+) -> None:
+    class StoppedHunter(ConformingMockHunter):
+        async def search(self, query: FontQuery) -> list[HunterResult]:
+            del query
+            raise PipelineStoppedError("stopped")
+
+    hunter = StoppedHunter("StoppedHunter")
+    hunter.rate_limit = 0.0
+    registry.register(hunter)
+    resolver = FontResolver(registry=registry, cache=mock_cache, config=config)
+    query = FontQuery(
+        requested_name="Arial", anime_title="Naruto", episode_path="ep1.mkv"
+    )  # type: ignore
+
+    with pytest.raises(PipelineStoppedError):
+        await resolver.resolve(query)
+
+    assert registry.get_circuit(hunter.name)._failure_count == 0
+
+
+@pytest.mark.anyio
+async def test_scoped_resolver_stops_before_cache_lookup(
+    registry, mock_cache, config, tmp_path: Path
+) -> None:
+    stop_event = asyncio.Event()
+    stop_event.set()
+    resolver = FontResolver(registry=registry, cache=mock_cache, config=config)
+    scoped_resolver = resolver.for_run(tmp_path / "Show A", stop_event)
+    query = FontQuery(
+        requested_name="Arial", anime_title="Naruto", episode_path="ep1.mkv"
+    )  # type: ignore
+
+    with pytest.raises(PipelineStoppedError):
+        await scoped_resolver.resolve(query)
+
+    mock_cache.lookup.assert_not_called()

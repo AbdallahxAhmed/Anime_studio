@@ -1,11 +1,12 @@
 import asyncio
+from pathlib import Path
 import structlog
 import httpx
 from typing import TYPE_CHECKING
 from src.core.font_cache import FontCache
 from src.config import AppConfig
 from src.models.font import FontQuery, FontAsset
-from src.errors import FontMatchError
+from src.errors import FontMatchError, PipelineStoppedError
 from src.ports.font_hunter import HunterProtocol
 
 if TYPE_CHECKING:
@@ -14,21 +15,49 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def _raise_if_stopped(stop_event: asyncio.Event | None) -> None:
+    """Keep cooperative cancellation neutral throughout font resolution."""
+    if stop_event is not None and stop_event.is_set():
+        raise PipelineStoppedError("Font resolution stopped by user")
+
+
 class FontResolver:
     """Orchestrator for the 6-layer font resolution chain with circuit breakers and rate limits."""
 
-    def __init__(self, registry: "HunterRegistry", cache: FontCache, config: AppConfig):
+    def __init__(
+        self,
+        registry: "HunterRegistry",
+        cache: FontCache,
+        config: AppConfig,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
         self.registry = registry
         self.cache = cache
         self.config = config
+        self._stop_event = stop_event
+
+    def for_run(
+        self,
+        discovery_root: Path | None,
+        stop_event: asyncio.Event | None = None,
+    ) -> "FontResolver":
+        """Return a resolver whose scoped hunters cannot affect another run."""
+        return FontResolver(
+            registry=self.registry.for_run(discovery_root, stop_event),
+            cache=self.cache,
+            config=self.config,
+            stop_event=stop_event,
+        )
 
     async def resolve(self, query: FontQuery) -> FontAsset:
         """Resolve a font query via the persistent cache or active hunters fallback."""
+        _raise_if_stopped(self._stop_event)
         logger.info("Starting font resolution", font_name=query.requested_name)
         audit_trail = []
 
         # Layer 1: Cache Lookup
         cached_asset = self.cache.lookup(query.requested_name)
+        _raise_if_stopped(self._stop_event)
         if cached_asset is not None:
             logger.info("Font resolved from cache", font_name=query.requested_name)
             return cached_asset
@@ -37,6 +66,7 @@ class FontResolver:
 
         # Fallback to Hunters
         for hunter in self.registry.iter_hunters():
+            _raise_if_stopped(self._stop_event)
             if not hunter.supports(query):
                 audit_trail.append(f"Hunter {hunter.name} does not support query.")
                 logger.debug("Hunter does not support query", hunter_name=hunter.name)
@@ -52,9 +82,11 @@ class FontResolver:
                         delay=hunter.rate_limit,
                     )
                     await asyncio.sleep(hunter.rate_limit)
+                    _raise_if_stopped(self._stop_event)
 
                 logger.info("Attempting resolution via hunter", hunter_name=hunter.name)
                 results = await hunter.search(query)
+                _raise_if_stopped(self._stop_event)
                 if not results:
                     audit_trail.append(
                         f"Hunter {hunter.name} returned 0 search results."
@@ -73,9 +105,11 @@ class FontResolver:
 
                 # Download first result
                 payload = await hunter.download(results[0])
+                _raise_if_stopped(self._stop_event)
 
                 # Cache and return asset
                 asset = self.cache.store(payload, layer_found=hunter.priority)
+                _raise_if_stopped(self._stop_event)
                 cb.record_success()
                 logger.info(
                     "Font successfully resolved and cached",
@@ -83,6 +117,10 @@ class FontResolver:
                     source=hunter.name,
                 )
                 return asset
+            except asyncio.CancelledError:
+                raise
+            except PipelineStoppedError:
+                raise
             except Exception as e:
                 audit_trail.append(f"Hunter {hunter.name} failed: {e}")
                 logger.warning(

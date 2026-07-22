@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from src.models.pipeline import ShowSummary, ShowStatus
 from src.gui.signals import SignalBridge
+from src.gui.theme import TOKENS
 from src.gui.widgets.show_sidebar import ShowSidebarWidget
 
 
@@ -50,14 +51,16 @@ def test_sidebar_populate_shows() -> None:
     assert sidebar._list_widget.count() == 2
 
     item1 = sidebar._list_widget.item(0)
-    assert "Wistoria Season 2" in item1.text()
+    assert "Ready" in item1.text()
     assert "2 processed" in item1.text()
+    assert "Wistoria Season 2" in item1.toolTip()
 
     item2 = sidebar._list_widget.item(1)
-    assert "Hunter x Hunter" in item2.text()
+    assert "Pending" in item2.text()
+    assert "Hunter x Hunter" in item2.toolTip()
 
 
-def test_sidebar_show_selected_signal(mocker) -> None:
+def test_sidebar_show_selected_signal() -> None:
     """3. Clicking a show emits show_selected with correct (name, path)."""
     bridge = SignalBridge()
     sidebar = ShowSidebarWidget(signal_bridge=bridge)
@@ -71,15 +74,15 @@ def test_sidebar_show_selected_signal(mocker) -> None:
     )
     sidebar.add_show(show)
 
-    mock_slot = mocker.Mock()
-    sidebar.show_selected.connect(mock_slot)
+    emissions: list[tuple[str, Path]] = []
+    sidebar.show_selected.connect(lambda name, path: emissions.append((name, path)))
 
     item = sidebar._list_widget.item(0)
     sidebar._on_item_clicked(item)
 
-    mock_slot.assert_called_once_with(
-        "Wistoria Season 2", Path("D:/Entertainment/Anime/Wistoria Season 2")
-    )
+    assert emissions == [
+        ("Wistoria Season 2", Path("D:/Entertainment/Anime/Wistoria Season 2"))
+    ]
 
 
 def test_sidebar_update_show_status() -> None:
@@ -106,7 +109,7 @@ def test_sidebar_update_show_status() -> None:
 
 
 def test_sidebar_status_icon_color_check() -> None:
-    """5. ALL_DONE shows green icon (QPainter color check)."""
+    """5. Status dots use the centralized semantic token colors."""
     bridge = SignalBridge()
     sidebar = ShowSidebarWidget(signal_bridge=bridge)
 
@@ -115,13 +118,13 @@ def test_sidebar_status_icon_color_check() -> None:
     image = pixmap.toImage()
     # Check the color at center (8, 8)
     color = image.pixelColor(8, 8)
-    assert color.name() == "#7ed321"
+    assert color.name() == TOKENS.success.casefold()
 
     icon_warning = sidebar._get_status_icon(ShowStatus.WARNING)
     pixmap_warning = icon_warning.pixmap(16, 16)
     image_warning = pixmap_warning.toImage()
     color_warning = image_warning.pixelColor(8, 8)
-    assert color_warning.name() == "#e8572a"
+    assert color_warning.name() == TOKENS.warning.casefold()
 
 
 def test_sidebar_empty_populate() -> None:
@@ -132,20 +135,93 @@ def test_sidebar_empty_populate() -> None:
     assert sidebar._list_widget.count() == 0
 
 
-def test_sidebar_refresh_button_discoverability(mocker) -> None:
+def test_sidebar_refresh_button_discoverability() -> None:
     """Task 3: Refresh button has visible text 'Refresh', tooltip, and emits refresh_requested."""
     bridge = SignalBridge()
     sidebar = ShowSidebarWidget(signal_bridge=bridge)
 
-    assert sidebar._refresh_btn.text() == "↻ Refresh"
-    assert sidebar._refresh_btn.toolTip() == "Refresh Library Index (Full Rescan)"
+    assert sidebar._refresh_btn.text() == "Refresh"
+    assert sidebar._refresh_btn.toolTip() == "Refresh library index (full rescan)"
+    assert sidebar._refresh_btn.accessibleName() == "Refresh library index"
 
-    mock_slot = mocker.Mock()
-    sidebar.refresh_requested.connect(mock_slot)
+    refresh_count = 0
+
+    def record_refresh() -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+
+    sidebar.refresh_requested.connect(record_refresh)
 
     sidebar._refresh_btn.click()
-    mock_slot.assert_called_once()
-
+    assert refresh_count == 1
     sidebar.set_refresh_enabled(False)
     sidebar._refresh_btn.click()
-    mock_slot.assert_called_once()
+    assert refresh_count == 1
+
+
+def test_sidebar_accessibility_and_keyboard_navigation(qtbot) -> None:
+    """The sidebar has discoverable actions and keyboard selection."""
+    bridge = SignalBridge()
+    sidebar = ShowSidebarWidget(signal_bridge=bridge)
+    qtbot.addWidget(sidebar)
+    sidebar.populate(
+        [
+            ShowSummary(
+                name="Show A",
+                path=Path("C:/library/Show A"),
+                status=ShowStatus.READY,
+                episode_count=1,
+                processed_count=0,
+                subtitle_text="1 pending",
+            ),
+            ShowSummary(
+                name="Show B",
+                path=Path("C:/library/Show B"),
+                status=ShowStatus.PENDING,
+                episode_count=1,
+                processed_count=0,
+                subtitle_text="1 pending",
+            ),
+        ]
+    )
+
+    assert sidebar.accessibleName() == "Show library"
+    assert sidebar._list_widget.accessibleName() == "Shows"
+    assert sidebar._add_btn.toolTip() == "Add a folder to the library"
+
+    with qtbot.waitSignal(sidebar.show_selected) as signal:
+        sidebar._list_widget.setCurrentRow(1)
+    assert signal.args == ["Show B", Path("C:/library/Show B")]
+
+    sidebar.show()
+    sidebar._list_widget.setFocus()
+    with qtbot.waitSignal(sidebar.show_selected) as activated:
+        qtbot.keyClick(sidebar._list_widget, Qt.Key.Key_Return)
+    assert activated.args == ["Show B", Path("C:/library/Show B")]
+
+    with qtbot.waitSignal(sidebar.add_folder_requested) as add_requested:
+        sidebar._add_btn.setFocus()
+        qtbot.keyClick(sidebar._add_btn, Qt.Key.Key_Space)
+    assert add_requested.args == [None]
+
+
+def test_sidebar_long_identity_is_elided_but_full_path_is_available() -> None:
+    """Long show strings retain their full identity in tooltip and accessibility data."""
+    sidebar = ShowSidebarWidget(signal_bridge=SignalBridge())
+    long_name = "Very long English العربية 日本語 show title " * 4
+    path = Path("C:/library") / long_name
+    sidebar.add_show(
+        ShowSummary(
+            name=long_name,
+            path=path,
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="Long subtitle " * 8,
+        )
+    )
+
+    item = sidebar._list_widget.item(0)
+    assert str(path) in item.toolTip()
+    assert long_name in item.data(Qt.ItemDataRole.AccessibleTextRole)
+    assert not hasattr(sidebar, "_has_mkv_files")

@@ -2,6 +2,10 @@ class AnimeStudioError(Exception):
     """Base exception class for all Anime Studio errors."""
 
 
+class PipelineStoppedError(AnimeStudioError):
+    """Raised when a user cooperatively stops an in-progress pipeline run."""
+
+
 class ToolNotFoundError(AnimeStudioError):
     """Exception raised when a required external binary is not found."""
 

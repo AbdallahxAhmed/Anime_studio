@@ -118,11 +118,9 @@ def bootstrap_app(app: QApplication) -> Any:
     # Layer 1: MkvExtractHunter
     mkv_extract_mod = importlib.import_module("src.hunters.sources.mkv_extract")
     MkvExtractHunter = mkv_extract_mod.MkvExtractHunter
-    hunter_registry.register(
-        MkvExtractHunter(
-            subprocess_port=subprocess_adapter, library_path=config.library_path
-        )
-    )
+    # Scope this hunter per pipeline run. Binding the configured library root here
+    # would let a selected-show run enumerate unrelated MKVs on a cache miss.
+    hunter_registry.register(MkvExtractHunter(subprocess_port=subprocess_adapter))
 
     # Layer 2: SiblingFontHunter
     sibling_font_mod = importlib.import_module("src.hunters.sources.sibling_font")
