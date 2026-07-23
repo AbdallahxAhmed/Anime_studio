@@ -3,11 +3,13 @@ import logging
 from typing import Any
 import pytest
 import asyncio
+from structlog import contextvars as structlog_contextvars
 from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from src.errors import PipelineStoppedError
+from src.gui.log_bridge import GuiLogBridge
 from src.gui.main_window import MainWindow
 from src.models.report import PipelineReport
 from src.models.pipeline import (
@@ -797,6 +799,52 @@ def test_main_window_escape_requests_cooperative_stop(
 
 
 @pytest.mark.asyncio
+async def test_main_window_escape_cancels_scan_once_with_escape_reason(
+    qtbot, mocker, tmp_path: Path
+) -> None:
+    """Escape owns scan cancellation without duplicating the button lifecycle."""
+    show_path = tmp_path / "Escape Show"
+    scan_started = asyncio.Event()
+
+    async def scan_folder(
+        _path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
+        assert stop_event is not None
+        scan_started.set()
+        await stop_event.wait()
+        raise PipelineStoppedError("escape")
+
+    runner = mocker.MagicMock()
+    runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    log_bridge = MockLogBridge()
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=log_bridge,
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    scan_task = asyncio.create_task(
+        window._on_add_folder.__wrapped__(window, show_path)
+    )
+    await scan_started.wait()
+    qtbot.keyClick(window, Qt.Key.Key_Escape)
+    window._on_stop_click()
+    await scan_task
+
+    entries = log_bridge.get_session_log()
+    assert [entry["event"] for entry in entries] == [
+        "Folder scan stop requested",
+        "Folder scan stopped",
+    ]
+    assert all(entry["reason"] == "escape" for entry in entries)
+    assert all(entry["scan_generation"] == 1 for entry in entries)
+
+
+@pytest.mark.asyncio
 async def test_main_window_undo_button_opens_dialog(mocker, tmp_path: Path) -> None:
     """FR-014: Undo button queries UndoService and opens UndoDialog."""
     mock_runner = mocker.MagicMock()
@@ -977,6 +1025,8 @@ async def test_main_window_stop_is_neutral_and_restores_pre_run_status(
     from src.errors import PipelineStoppedError
 
     started = asyncio.Event()
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
     status_updates: list[tuple[Path, ShowStatus]] = []
 
     async def stopped_run(*_args: object, **kwargs: object) -> PipelineReport:
@@ -988,15 +1038,19 @@ async def test_main_window_stop_is_neutral_and_restores_pre_run_status(
 
     async def update_status(path: Path, status: ShowStatus) -> None:
         status_updates.append((path, status))
+        if status is ShowStatus.READY:
+            restore_started.set()
+            await release_restore.wait()
 
     mock_runner = mocker.MagicMock()
     mock_runner.run = mocker.AsyncMock(side_effect=stopped_run)
     mock_index = mocker.MagicMock(spec=MockIndexManager)
     mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
     error_dialog = mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
+    log_bridge = MockLogBridge()
     window = MainWindow(
         pipeline_runner=mock_runner,
-        log_bridge=MockLogBridge(),
+        log_bridge=log_bridge,
         config=MockConfig(tmp_path),
         font_ingestion_service=mocker.MagicMock(),
         show_index_manager=mock_index,
@@ -1018,6 +1072,10 @@ async def test_main_window_stop_is_neutral_and_restores_pre_run_status(
     await started.wait()
     window._on_stop_click()
     window._on_stop_click()
+    await restore_started.wait()
+    assert window._pipeline_running is True
+    assert window.run_button.isEnabled() is False
+    release_restore.set()
     await run_task
 
     assert error_dialog.call_count == 0
@@ -1031,6 +1089,17 @@ async def test_main_window_stop_is_neutral_and_restores_pre_run_status(
         (show_path.resolve(), ShowStatus.READY),
     ]
     assert window._sidebar.get_show_status(show_path.resolve()) is ShowStatus.READY
+    events = log_bridge.get_session_log()
+    assert [entry["event"] for entry in events] == [
+        "Pipeline stop requested",
+        "Pipeline stopped by user",
+    ]
+    assert all(entry["run_generation"] == 1 for entry in events)
+    assert all(entry["selected_count"] == 1 for entry in events)
+    assert all(entry["active_show_name"] == "Stopped Show" for entry in events)
+    assert all(
+        entry["active_show_path"] == str(show_path.resolve()) for entry in events
+    )
 
 
 @pytest.mark.asyncio
@@ -1176,9 +1245,10 @@ async def test_main_window_treats_late_success_after_stop_as_neutral(
 async def test_main_window_stop_events_persist_across_a_deliberate_second_run(
     mocker, tmp_path: Path
 ) -> None:
-    """A stopped run stays exportable after the user starts a later successful run."""
+    """A stopped run and one canonical later success both remain exportable."""
     first_run_started = asyncio.Event()
     calls = 0
+    log_bridge = GuiLogBridge()
 
     async def run_pipeline(*_args: object, **kwargs: object) -> PipelineReport:
         nonlocal calls
@@ -1188,6 +1258,27 @@ async def test_main_window_stop_events_persist_across_a_deliberate_second_run(
             assert isinstance(stop_event, asyncio.Event)
             first_run_started.set()
             await stop_event.wait()
+        else:
+            context = structlog_contextvars.get_contextvars()
+            assert context["run_generation"] == 2
+            assert context["selected_count"] == 1
+            assert context["active_show_name"] == "Stopped Show"
+            assert context["active_show_path"] == str(
+                (tmp_path / "Stopped Show").resolve()
+            )
+            log_bridge(
+                None,
+                "info",
+                {
+                    "event": "Pipeline completed successfully",
+                    "level": "info",
+                    "timestamp": datetime.now().isoformat(),
+                    "run_generation": context["run_generation"],
+                    "selected_count": context["selected_count"],
+                    "active_show_name": context["active_show_name"],
+                    "active_show_path": context["active_show_path"],
+                },
+            )
         return PipelineReport(
             run_timestamp=datetime.now(timezone.utc),
             duration_ms=1.0,
@@ -1197,7 +1288,6 @@ async def test_main_window_stop_events_persist_across_a_deliberate_second_run(
             genuine_misses=[],
         )
 
-    log_bridge = MockLogBridge()
     runner = mocker.MagicMock()
     runner.run = mocker.AsyncMock(side_effect=run_pipeline)
     index = mocker.MagicMock(spec=MockIndexManager)
@@ -1228,24 +1318,50 @@ async def test_main_window_stop_events_persist_across_a_deliberate_second_run(
     window._on_stop_click()
     await first_task
     assert window.run_button.isEnabled()
+    assert "Pipeline completed successfully" not in [
+        entry["event"] for entry in log_bridge.get_session_log()
+    ]
 
     await window._on_run_click.__wrapped__(window)
 
-    events = [str(entry["event"]) for entry in log_bridge.get_session_log()]
+    entries = log_bridge.get_session_log()
+    events = [str(entry["event"]) for entry in entries]
     assert events.count("Pipeline stop requested") == 1
     assert events.count("Pipeline stopped by user") == 1
+    assert events.count("Pipeline completed successfully") == 1
+    assert "Pipeline executed successfully" not in events
     assert "Pipeline failed" not in events
+    stopped_entries = [
+        entry
+        for entry in entries
+        if entry["event"] in {"Pipeline stop requested", "Pipeline stopped by user"}
+    ]
+    assert all(entry["run_generation"] == 1 for entry in stopped_entries)
+    success_entry = next(
+        entry
+        for entry in entries
+        if entry["event"] == "Pipeline completed successfully"
+    )
+    assert success_entry["run_generation"] == 2
+    assert success_entry["selected_count"] == 1
+    assert success_entry["active_show_name"] == "Stopped Show"
     assert (
         window.progress_panel.status_label.text() == "Pipeline executed successfully!"
     )
+
+    window.activity_feed.clear_button.click()
+    assert window.activity_feed.log_display.toPlainText() == ""
+    assert [entry["event"] for entry in log_bridge.get_session_log()] == events
 
     from src.core.log_export import export_log_to_file
 
     export_path = tmp_path / "stop-sequence.txt"
     await export_log_to_file(log_bridge.get_session_log(), export_path)
     exported = export_path.read_text(encoding="utf-8")
-    assert "Pipeline stop requested" in exported
-    assert "Pipeline stopped by user" in exported
+    assert exported.count("Pipeline stop requested") == 1
+    assert exported.count("Pipeline stopped by user") == 1
+    assert exported.count("Pipeline completed successfully") == 1
+    assert "Pipeline executed successfully" not in exported
 
 
 @pytest.mark.asyncio
@@ -1297,6 +1413,75 @@ async def test_main_window_real_overlapping_refresh(mocker, tmp_path: Path) -> N
     assert window._is_refreshing is False
     assert window._sidebar.is_refresh_enabled() is True
     assert mock_index.save.call_count == 1
+    entries = log_bridge.get_session_log()
+    assert [entry["event"] for entry in entries] == [
+        "Folder scan stop requested",
+        "Folder scan stopped",
+    ]
+    assert all(entry["scan_generation"] == 1 for entry in entries)
+    assert all(entry["scan_kind"] == "refresh" for entry in entries)
+    assert all(entry["scan_root"] == str(tmp_path.resolve()) for entry in entries)
+    assert all(entry["reason"] == "superseded" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_main_window_add_folder_supersedes_refresh_with_durable_history(
+    mocker, tmp_path: Path
+) -> None:
+    """A latest Add Folder request stops Refresh without stale UI mutations."""
+    refresh_started = asyncio.Event()
+    added_path = tmp_path / "Added Show"
+
+    async def scan_library(
+        _path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
+        assert stop_event is not None
+        refresh_started.set()
+        await stop_event.wait()
+        raise PipelineStoppedError("superseded refresh")
+
+    async def scan_folder(
+        path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
+        assert path == added_path.resolve()
+        assert stop_event is not None
+        assert not stop_event.is_set()
+        return _scan_output(added_path, "Added Show")
+
+    runner = mocker.MagicMock()
+    runner.library_scanner.scan = mocker.AsyncMock(side_effect=scan_library)
+    runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    index = mocker.MagicMock(spec=MockIndexManager)
+    index.save = mocker.AsyncMock()
+    index.add_show = mocker.AsyncMock()
+    log_bridge = MockLogBridge()
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=log_bridge,
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=index,
+    )
+
+    refresh_task = asyncio.create_task(window._on_refresh_index.__wrapped__(window))
+    await refresh_started.wait()
+    await window._on_add_folder.__wrapped__(window, added_path)
+    await refresh_task
+
+    entries = log_bridge.get_session_log()
+    assert [entry["event"] for entry in entries] == [
+        "Folder scan stop requested",
+        "Folder scan stopped",
+    ]
+    assert all(entry["scan_generation"] == 1 for entry in entries)
+    assert all(entry["scan_kind"] == "refresh" for entry in entries)
+    assert all(entry["scan_root"] == str(tmp_path.resolve()) for entry in entries)
+    assert all(entry["reason"] == "superseded" for entry in entries)
+    index.save.assert_not_awaited()
+    index.add_show.assert_awaited_once()
+    assert window._current_show_path == added_path.resolve()
+    assert window._current_show_name == "Added Show"
+    assert window._show_name_label.text() == "Added Show"
 
 
 @pytest.mark.asyncio
@@ -2110,9 +2295,10 @@ async def test_main_window_folder_scan_cancel_is_visible_idempotent_and_neutral(
 
     runner = mocker.MagicMock()
     runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    log_bridge = MockLogBridge()
     window = MainWindow(
         pipeline_runner=runner,
-        log_bridge=MockLogBridge(),
+        log_bridge=log_bridge,
         config=MockConfig(tmp_path),
         font_ingestion_service=mocker.MagicMock(),
         show_index_manager=MockIndexManager(tmp_path),
@@ -2135,10 +2321,15 @@ async def test_main_window_folder_scan_cancel_is_visible_idempotent_and_neutral(
     assert window._sidebar._add_btn.isEnabled()
     assert window._sidebar.is_refresh_enabled()
     assert window.run_button.isEnabled() is False
-    assert [entry["event"] for entry in window._log_bridge.get_session_log()] == [
+    entries = log_bridge.get_session_log()
+    assert [entry["event"] for entry in entries] == [
         "Folder scan stop requested",
         "Folder scan stopped",
     ]
+    assert all(entry["scan_generation"] == 1 for entry in entries)
+    assert all(entry["scan_kind"] == "add_folder" for entry in entries)
+    assert all(entry["scan_root"] == str(show_path.resolve()) for entry in entries)
+    assert all(entry["reason"] == "user" for entry in entries)
 
 
 @pytest.mark.asyncio
@@ -2159,9 +2350,10 @@ async def test_main_window_close_requests_folder_scan_cleanup(
 
     runner = mocker.MagicMock()
     runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    log_bridge = MockLogBridge()
     window = MainWindow(
         pipeline_runner=runner,
-        log_bridge=MockLogBridge(),
+        log_bridge=log_bridge,
         config=MockConfig(tmp_path),
         font_ingestion_service=mocker.MagicMock(),
         show_index_manager=MockIndexManager(tmp_path),
@@ -2178,3 +2370,12 @@ async def test_main_window_close_requests_folder_scan_cleanup(
     assert window._close_scan_cleanup_task is not None
     await window._close_scan_cleanup_task
     assert window._active_scan is None
+    assert scan_task.done()
+    assert window._close_scan_cleanup_task.done()
+    entries = log_bridge.get_session_log()
+    assert [entry["event"] for entry in entries] == [
+        "Folder scan stop requested",
+        "Folder scan stopped",
+    ]
+    assert all(entry["reason"] == "window_close" for entry in entries)
+    assert all(entry["scan_generation"] == 1 for entry in entries)

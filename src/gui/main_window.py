@@ -10,6 +10,7 @@ from typing import Any, TYPE_CHECKING
 from pathlib import Path
 from qasync import asyncSlot
 from PySide6.QtGui import QFontMetrics, QKeyEvent, QResizeEvent
+from structlog import contextvars as structlog_contextvars
 
 if TYPE_CHECKING:
     from src.models.run_manifest import RunManifest
@@ -50,6 +51,15 @@ class DiscoveryScanKind(str, Enum):
     SHOW_SELECTION = "show_selection"
 
 
+class DiscoveryScanStopReason(str, Enum):
+    """Reasons a discovery scan can enter its neutral stopped outcome."""
+
+    USER = "user"
+    ESCAPE = "escape"
+    SUPERSEDED = "superseded"
+    WINDOW_CLOSE = "window_close"
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveDiscoveryScan:
     """Immutable identity and cancellation state for one GUI discovery scan."""
@@ -59,6 +69,17 @@ class ActiveDiscoveryScan:
     generation: int
     stop_event: asyncio.Event
     task: asyncio.Task[Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivePipelineRun:
+    """Immutable lifecycle context for one accepted pipeline run."""
+
+    generation: int
+    selection_generation: int
+    selected_count: int
+    show_name: str
+    show_path: Path
 
 
 class MainWindow(QMainWindow):
@@ -88,9 +109,19 @@ class MainWindow(QMainWindow):
         self._checkpoint_manager = checkpoint_manager
         self._undo_service = undo_service
         self._pipeline_running = False
+        # Selection generation owns visible-UI staleness only. Deliberate runs of
+        # the same selection share it, so durable run lifecycle correlation uses
+        # this separate monotonic identity.
+        self._run_generation = 0
+        self._active_run: ActivePipelineRun | None = None
+        self._pipeline_stop_requested_generations: set[int] = set()
+        self._pipeline_stop_completed_generations: set[int] = set()
         self._is_refreshing = False
         self._scan_generation = 0
         self._active_scan: ActiveDiscoveryScan | None = None
+        self._scan_stop_reasons: dict[int, DiscoveryScanStopReason] = {}
+        self._scan_stop_completed_generations: set[int] = set()
+        self._discovery_scan_transition_lock = asyncio.Lock()
         self._close_scan_cleanup_task: asyncio.Task[None] | None = None
         self._selection_generation = 0
         self._current_show_name: str | None = None
@@ -331,9 +362,9 @@ class MainWindow(QMainWindow):
         if active is None:
             return
 
-        if not active.stop_event.is_set():
-            active.stop_event.set()
-            self._show_scan_stopping(active)
+        self._request_discovery_scan_stop(
+            active, reason=DiscoveryScanStopReason.SUPERSEDED
+        )
 
         active_task = active.task
         current_task = asyncio.current_task()
@@ -348,22 +379,23 @@ class MainWindow(QMainWindow):
         self, kind: DiscoveryScanKind, root: Path
     ) -> ActiveDiscoveryScan | None:
         """Replace any earlier discovery scan with a latest-wins operation."""
-        if self._pipeline_running:
-            return None
+        async with self._discovery_scan_transition_lock:
+            if self._pipeline_running:
+                return None
 
-        await self._stop_active_discovery_scan()
-        self._scan_generation += 1
-        scan = ActiveDiscoveryScan(
-            kind=kind,
-            root=root.expanduser().resolve(),
-            generation=self._scan_generation,
-            stop_event=asyncio.Event(),
-            task=asyncio.current_task(),
-        )
-        self._active_scan = scan
-        self._is_refreshing = kind is DiscoveryScanKind.REFRESH
-        self._show_scan_started(scan)
-        return scan
+            await self._stop_active_discovery_scan()
+            self._scan_generation += 1
+            scan = ActiveDiscoveryScan(
+                kind=kind,
+                root=root.expanduser().resolve(),
+                generation=self._scan_generation,
+                stop_event=asyncio.Event(),
+                task=asyncio.current_task(),
+            )
+            self._active_scan = scan
+            self._is_refreshing = kind is DiscoveryScanKind.REFRESH
+            self._show_scan_started(scan)
+            return scan
 
     def _show_scan_started(self, scan: ActiveDiscoveryScan) -> None:
         """Render one discovery scan as the active operation, never a pipeline run."""
@@ -404,6 +436,11 @@ class MainWindow(QMainWindow):
         self, scan: ActiveDiscoveryScan, outcome: str, error: Exception | None = None
     ) -> None:
         """Restore every scan-owned control exactly once for all terminal paths."""
+        # Lifecycle evidence belongs to the scan even if it became stale. Only
+        # widget mutations below are owned by the currently visible operation.
+        if outcome == "stopped":
+            self._record_scan_stopped(scan)
+
         if self._active_scan != scan:
             return
 
@@ -423,7 +460,6 @@ class MainWindow(QMainWindow):
         self._episode_table.setEnabled(not self._pipeline_running)
 
         if outcome == "stopped":
-            self._record_scan_stopped(scan)
             self.progress_panel.set_stopped()
             self.progress_panel.set_status("Folder scan stopped")
         elif outcome == "error":
@@ -687,7 +723,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        run_generation = self._selection_generation
+        selection_generation = self._selection_generation
         run_show_path = self._current_show_path
         run_show_name = self._current_show_name
         run_selected_paths = frozenset(
@@ -732,6 +768,15 @@ class MainWindow(QMainWindow):
         PipelineConfig = pipeline_mod.PipelineConfig
 
         # Lock UI controls during active pipeline run
+        self._run_generation += 1
+        run = ActivePipelineRun(
+            generation=self._run_generation,
+            selection_generation=selection_generation,
+            selected_count=len(run_selected_paths),
+            show_name=run_show_name,
+            show_path=run_show_path,
+        )
+        self._active_run = run
         self._pipeline_running = True
         self.run_button.setEnabled(False)
         self.undo_button.setEnabled(False)
@@ -761,7 +806,7 @@ class MainWindow(QMainWindow):
             if stop_event.is_set():
                 raise PipelineStoppedError("Pipeline stopped by user")
             if (
-                run_generation == self._selection_generation
+                run.selection_generation == self._selection_generation
                 and run_show_path == self._current_show_path
                 and run_show_name == self._current_show_name
             ):
@@ -785,12 +830,18 @@ class MainWindow(QMainWindow):
                 selected_paths=run_selected_paths,
             )
 
-            report = await self.pipeline_runner.run(
-                config,
-                stop_event=stop_event,
-                checkpoint_manager=self._checkpoint_manager,
-                undo_service=self._undo_service,
+            run_context_tokens = structlog_contextvars.bind_contextvars(
+                **self._run_lifecycle_context(run)
             )
+            try:
+                report = await self.pipeline_runner.run(
+                    config,
+                    stop_event=stop_event,
+                    checkpoint_manager=self._checkpoint_manager,
+                    undo_service=self._undo_service,
+                )
+            finally:
+                structlog_contextvars.reset_contextvars(**run_context_tokens)
 
             # A runner can complete an in-flight bounded operation after Stop.
             # Never render a successful result once the UI has observed Stop.
@@ -802,7 +853,7 @@ class MainWindow(QMainWindow):
             # Update statuses on completion
             final_status = ShowStatus.ALL_DONE
             is_current_run_show = (
-                run_generation == self._selection_generation
+                run.selection_generation == self._selection_generation
                 and run_show_path == self._current_show_path
                 and run_show_name == self._current_show_name
             )
@@ -840,9 +891,9 @@ class MainWindow(QMainWindow):
         except PipelineStoppedError:
             # Record the terminal neutral outcome before restoration so a
             # secondary status-write failure cannot suppress export evidence.
-            self._record_pipeline_stopped()
+            self._record_pipeline_stopped(run)
             is_current_run_show = (
-                run_generation == self._selection_generation
+                run.selection_generation == self._selection_generation
                 and run_show_path == self._current_show_path
                 and run_show_name == self._current_show_name
             )
@@ -876,7 +927,7 @@ class MainWindow(QMainWindow):
 
             if processing_status_persisted:
                 if (
-                    run_generation == self._selection_generation
+                    run.selection_generation == self._selection_generation
                     and run_show_path == self._current_show_path
                     and run_show_name == self._current_show_name
                 ):
@@ -902,8 +953,10 @@ class MainWindow(QMainWindow):
             self._episode_table.setEnabled(True)
             self._sidebar.set_navigation_enabled(self._active_scan is None)
             self._on_selection_changed(self._episode_table.get_selected_paths())
+            if self._active_run == run:
+                self._active_run = None
 
-    def _record_log_event(self, entry: dict[str, Any]) -> None:
+    def _record_log_event(self, entry: dict[str, object]) -> None:
         """Durable, thread-safe recording of an event into session log and activity feed."""
         entry_copy = entry.copy()
         if "level" not in entry_copy:
@@ -920,55 +973,106 @@ class MainWindow(QMainWindow):
         else:
             self.signal_bridge.log_received.emit(entry_copy)
 
-    def _record_pipeline_stop_requested(self) -> None:
+    def _record_activity_event(self, event: str, **context: str | int) -> None:
+        """Record one explicit GUI lifecycle event through the common bridge."""
         self._record_log_event(
             {
-                "event": "Pipeline stop requested",
+                "event": event,
                 "level": "info",
                 "timestamp": datetime.now().isoformat(),
+                **context,
             }
         )
 
-    def _record_pipeline_stopped(self) -> None:
-        self._record_log_event(
-            {
-                "event": "Pipeline stopped by user",
-                "level": "info",
-                "timestamp": datetime.now().isoformat(),
-            }
+    def _scan_lifecycle_context(
+        self,
+        scan: ActiveDiscoveryScan,
+        reason: DiscoveryScanStopReason | None = None,
+    ) -> dict[str, str | int]:
+        """Build the durable correlation fields for an existing scan identity."""
+        context: dict[str, str | int] = {
+            "scan_generation": scan.generation,
+            "scan_kind": scan.kind.value,
+            "scan_root": str(scan.root),
+        }
+        if reason is not None:
+            context["reason"] = reason.value
+        return context
+
+    def _run_lifecycle_context(self, run: ActivePipelineRun) -> dict[str, str | int]:
+        """Build durable correlation fields for one immutable pipeline run."""
+        return {
+            "run_generation": run.generation,
+            "selected_count": run.selected_count,
+            "active_show_name": run.show_name,
+            "active_show_path": str(run.show_path),
+        }
+
+    def _record_pipeline_stop_requested(self, run: ActivePipelineRun) -> None:
+        """Persist exactly one accepted stop request for its owning run."""
+        if run.generation in self._pipeline_stop_requested_generations:
+            return
+        self._pipeline_stop_requested_generations.add(run.generation)
+        self._record_activity_event(
+            "Pipeline stop requested", **self._run_lifecycle_context(run)
         )
 
-    def _record_scan_stop_requested(self, scan: ActiveDiscoveryScan) -> None:
-        self._record_log_event(
-            {
-                "event": "Folder scan stop requested",
-                "level": "info",
-                "timestamp": datetime.now().isoformat(),
-            }
+    def _record_pipeline_stopped(self, run: ActivePipelineRun) -> None:
+        """Persist exactly one neutral terminal outcome for its owning run."""
+        if run.generation in self._pipeline_stop_completed_generations:
+            return
+        self._pipeline_stop_completed_generations.add(run.generation)
+        self._record_activity_event(
+            "Pipeline stopped by user", **self._run_lifecycle_context(run)
+        )
+
+    def _record_scan_stop_requested(
+        self, scan: ActiveDiscoveryScan, reason: DiscoveryScanStopReason
+    ) -> None:
+        """Persist the first accepted cancellation request for one scan."""
+        if scan.generation in self._scan_stop_reasons:
+            return
+        self._scan_stop_reasons[scan.generation] = reason
+        self._record_activity_event(
+            "Folder scan stop requested",
+            **self._scan_lifecycle_context(scan, reason),
         )
 
     def _record_scan_stopped(self, scan: ActiveDiscoveryScan) -> None:
-        self._record_log_event(
-            {
-                "event": "Folder scan stopped",
-                "level": "info",
-                "timestamp": datetime.now().isoformat(),
-            }
+        """Persist a stopped terminal event even if the scan is now stale."""
+        if scan.generation in self._scan_stop_completed_generations:
+            return
+        self._scan_stop_completed_generations.add(scan.generation)
+        self._record_activity_event(
+            "Folder scan stopped",
+            **self._scan_lifecycle_context(
+                scan, self._scan_stop_reasons.get(scan.generation)
+            ),
         )
 
-    def _on_stop_click(self) -> None:
-        """Cancel the active discovery scan or stop the active pipeline run."""
+    def _request_discovery_scan_stop(
+        self, scan: ActiveDiscoveryScan, *, reason: DiscoveryScanStopReason
+    ) -> bool:
+        """Accept a scan cancellation once, then record and render that state."""
+        if scan.stop_event.is_set():
+            return False
+        scan.stop_event.set()
+        self._record_scan_stop_requested(scan, reason)
+        self._show_scan_stopping(scan)
+        return True
+
+    def _request_active_stop(self, *, scan_reason: DiscoveryScanStopReason) -> None:
+        """Request the neutral stop flow for the operation currently owning Stop."""
         active_scan = self._active_scan
         if active_scan is not None:
-            if not active_scan.stop_event.is_set():
-                active_scan.stop_event.set()
-                self._record_scan_stop_requested(active_scan)
-                self._show_scan_stopping(active_scan)
+            self._request_discovery_scan_stop(active_scan, reason=scan_reason)
             return
 
         if self._stop_event and not self._stop_event.is_set():
             self._stop_event.set()
-            self._record_pipeline_stop_requested()
+            active_run = self._active_run
+            if active_run is not None:
+                self._record_pipeline_stop_requested(active_run)
             self.stop_button.setEnabled(False)
             self.stop_button.setText("Stopping...")
             self.stop_button.setAccessibleName("Stopping pipeline")
@@ -977,6 +1081,10 @@ class MainWindow(QMainWindow):
                 "before the interface returns to idle."
             )
             self.stop_button.setToolTip("Stopping the active pipeline run")
+
+    def _on_stop_click(self) -> None:
+        """Cancel the active discovery scan or stop the active pipeline run."""
+        self._request_active_stop(scan_reason=DiscoveryScanStopReason.USER)
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_undo_click(self) -> None:
@@ -1180,7 +1288,7 @@ class MainWindow(QMainWindow):
         """Use Escape for the one user-visible operation that owns Stop."""
         if event.key() == Qt.Key.Key_Escape:
             if self._active_scan is not None or self._pipeline_running:
-                self._on_stop_click()
+                self._request_active_stop(scan_reason=DiscoveryScanStopReason.ESCAPE)
                 event.accept()
                 return
         super().keyPressEvent(event)
@@ -1189,7 +1297,9 @@ class MainWindow(QMainWindow):
         """Override close event to confirm exit if pipeline is active."""
         active_scan = self._active_scan
         if active_scan is not None:
-            self._on_stop_click()
+            self._request_discovery_scan_stop(
+                active_scan, reason=DiscoveryScanStopReason.WINDOW_CLOSE
+            )
             if active_scan.task is not None and not active_scan.task.done():
                 self._close_scan_cleanup_task = asyncio.create_task(
                     self._join_scan_on_close(active_scan)
