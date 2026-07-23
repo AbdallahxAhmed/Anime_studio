@@ -3,7 +3,7 @@
 **Last Updated**: 2026-07-24
 **Active Branch**: `011-gui-redesign`
 **Pre-Docs Final Implementation HEAD**: `fb3e95c8c9205e9ca8352ead9a80d6d83f67072a`
-**Constitution**: v1.7.0
+**Constitution**: v1.9.0
 **Status**: Phase 8 COMPLETE — HUMAN MANUAL PASS ✅ | 386 tests passed | Ruff, format, mypy --strict passed | **Next: Maintainer Push Decision**
 
 ---
@@ -100,7 +100,7 @@
 
 ---
 
-## 🏗️ Architecture Rules (Constitution v1.7.0)
+## 🏗️ Architecture Rules (Constitution v1.9.0)
 
 ### Hexagonal Layer Restrictions (STRICT)
 ```

@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-27
 
-**Status**: Complete — Phase 8 Human Manual PASS (2026-07-24) | 386 tests, ruff, format, mypy --strict passed | HEAD `fb3e95c`
+**Status**: Complete — Phase 8 Human Manual PASS (2026-07-24) | 386 tests, ruff, format, mypy --strict passed | Phase 8 implementation baseline `fb3e95c`
 
 **Input**: User description: "Phase 8a — GUI Redesign. Replace vertical-stack GUI with modern two-panel layout (sidebar + main panel). Fix inverted workflow, outdated layout, checkbox tree."
 
