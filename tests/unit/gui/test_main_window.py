@@ -399,7 +399,8 @@ async def test_main_window_add_show_folder_single_scan_and_sync(
 
     # Invokes scan_folder() EXACTLY ONCE
     assert mock_runner.library_scanner.scan_folder.call_count == 1
-    mock_runner.library_scanner.scan_folder.assert_called_once_with(show_path)
+    mock_runner.library_scanner.scan_folder.assert_called_once()
+    assert mock_runner.library_scanner.scan_folder.call_args.args[0] == show_path
 
     # Adds ShowSummary to index
     mock_index.add_show.assert_called_once()
@@ -460,7 +461,8 @@ async def test_main_window_show_selected(mocker, tmp_path: Path) -> None:
 
     await window._on_show_selected.__wrapped__(window, "My Show", tmp_path / "My Show")
 
-    mock_runner.library_scanner.scan_folder.assert_called_once_with(
+    mock_runner.library_scanner.scan_folder.assert_called_once()
+    assert mock_runner.library_scanner.scan_folder.call_args.args[0] == (
         tmp_path / "My Show"
     )
     mock_runner.library_scanner.scan.assert_not_called()
@@ -603,14 +605,15 @@ async def test_main_window_explicit_refresh_performs_single_full_scan(
 
     await window._on_refresh_index.__wrapped__(window)
 
-    mock_runner.library_scanner.scan.assert_called_once_with(tmp_path)
+    mock_runner.library_scanner.scan.assert_called_once()
+    assert mock_runner.library_scanner.scan.call_args.args[0] == tmp_path
     mock_index.save.assert_called_once()
     assert window._is_refreshing is False
 
 
 @pytest.mark.asyncio
 async def test_main_window_concurrent_refresh_prevented(mocker, tmp_path: Path) -> None:
-    """FR-015: Duplicate/concurrent refresh trigger is safely ignored."""
+    """The legacy flag cannot bypass the authoritative active-scan lifecycle."""
     mock_runner = mocker.MagicMock()
     mock_runner.library_scanner.scan = mocker.AsyncMock()
 
@@ -630,7 +633,7 @@ async def test_main_window_concurrent_refresh_prevented(mocker, tmp_path: Path) 
     window._is_refreshing = True
     await window._on_refresh_index.__wrapped__(window)
 
-    mock_runner.library_scanner.scan.assert_not_called()
+    mock_runner.library_scanner.scan.assert_called_once()
 
 
 # --- GAP 3: FR-014 Functionality Regression Tests ---
@@ -1154,13 +1157,18 @@ async def test_main_window_treats_late_success_after_stop_as_neutral(
 
 @pytest.mark.asyncio
 async def test_main_window_real_overlapping_refresh(mocker, tmp_path: Path) -> None:
-    """Task 3: Real concurrency test for overlapping library refresh requests."""
+    """A second Refresh supersedes and joins the first one without stale output."""
     entered_scan_event = asyncio.Event()
-    release_scan_event = asyncio.Event()
+    calls = 0
 
-    async def mock_scan(*args, **kwargs):
+    async def mock_scan(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
         entered_scan_event.set()
-        await release_scan_event.wait()
+        if calls == 1:
+            stop_event = kwargs["stop_event"]
+            await stop_event.wait()
+            raise PipelineStoppedError("superseded")
         return LibraryScanOutput(episodes=[], font_directories=[], show_tree=())
 
     mock_runner = mocker.MagicMock()
@@ -1187,12 +1195,11 @@ async def test_main_window_real_overlapping_refresh(mocker, tmp_path: Path) -> N
     assert window._is_refreshing is True
     assert window._sidebar.is_refresh_enabled() is False
 
-    await window._on_refresh_index.__wrapped__(window)
-
-    assert mock_runner.library_scanner.scan.call_count == 1
-
-    release_scan_event.set()
+    task2 = asyncio.create_task(window._on_refresh_index.__wrapped__(window))
+    await task2
     await task1
+
+    assert mock_runner.library_scanner.scan.call_count == 2
 
     assert window._is_refreshing is False
     assert window._sidebar.is_refresh_enabled() is True
@@ -1249,7 +1256,7 @@ async def test_qt_signal_qasync_slot_bridge_smoke_test(mocker, tmp_path: Path) -
     """Task 5: Real Qt signal -> qasync asyncSlot smoke test without calling .__wrapped__."""
     scan_called_event = asyncio.Event()
 
-    async def mock_scan(path: Path) -> LibraryScanOutput:
+    async def mock_scan(path: Path, **_kwargs: object) -> LibraryScanOutput:
         scan_called_event.set()
         return LibraryScanOutput(episodes=[], font_directories=[], show_tree=())
 
@@ -1276,7 +1283,8 @@ async def test_qt_signal_qasync_slot_bridge_smoke_test(mocker, tmp_path: Path) -
     await asyncio.wait_for(scan_called_event.wait(), timeout=2.0)
 
     # Verify that the async scanner was called without calling .__wrapped__
-    mock_runner.library_scanner.scan.assert_called_once_with(tmp_path)
+    mock_runner.library_scanner.scan.assert_called_once()
+    assert mock_runner.library_scanner.scan.call_args.args[0] == tmp_path
 
 
 @pytest.mark.asyncio
@@ -1378,7 +1386,8 @@ async def test_main_window_add_folder_child_show_folder_scans_normally(
     child_path = tmp_path / "SubShow"
     await window._on_add_folder.__wrapped__(window, child_path)
 
-    mock_runner.library_scanner.scan_folder.assert_called_once_with(child_path)
+    mock_runner.library_scanner.scan_folder.assert_called_once()
+    assert mock_runner.library_scanner.scan_folder.call_args.args[0] == child_path
     mock_index.add_show.assert_called_once()
     assert window._sidebar._list_widget.count() == 1
 
@@ -1510,13 +1519,15 @@ async def test_main_window_show_selection_latest_request_wins(
     show_a = tmp_path / "Show A"
     show_b = tmp_path / "Show B"
     a_started = asyncio.Event()
-    release_a = asyncio.Event()
 
-    async def scan_folder(path: Path) -> LibraryScanOutput:
+    async def scan_folder(
+        path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
         if path == show_a.resolve():
             a_started.set()
-            await release_a.wait()
-            return _scan_output(show_a, "Show A")
+            assert stop_event is not None
+            await stop_event.wait()
+            raise PipelineStoppedError("superseded")
         return _scan_output(show_b, "Show B")
 
     mock_runner = mocker.MagicMock()
@@ -1534,7 +1545,6 @@ async def test_main_window_show_selection_latest_request_wins(
     )
     await a_started.wait()
     await window._on_show_selected.__wrapped__(window, "Show B", show_b)
-    release_a.set()
     await task_a
 
     assert window._current_show_path == show_b.resolve()
@@ -1543,10 +1553,10 @@ async def test_main_window_show_selection_latest_request_wins(
 
 
 @pytest.mark.asyncio
-async def test_main_window_failed_current_selection_clears_previous_show(
+async def test_main_window_failed_current_selection_preserves_previous_show(
     mocker, tmp_path: Path
 ) -> None:
-    """A current scan error leaves no prior show or checked episodes runnable."""
+    """A current scan error keeps the last valid show and selection available."""
     from src.errors import AnimeStudioError
 
     mock_runner = mocker.MagicMock()
@@ -1564,10 +1574,10 @@ async def test_main_window_failed_current_selection_clears_previous_show(
 
     await window._on_show_selected.__wrapped__(window, "Broken", tmp_path / "Broken")
 
-    assert window._current_show_path is None
-    assert window._current_show_name is None
-    assert window._episode_table.get_selected_paths() == []
-    assert window.run_button.isEnabled() is False
+    assert window._current_show_path == (tmp_path / "Old")
+    assert window._current_show_name == "Old"
+    assert window._episode_table.get_selected_paths()
+    assert window.run_button.isEnabled() is True
 
 
 @pytest.mark.asyncio
@@ -1575,18 +1585,18 @@ async def test_main_window_stale_selection_failure_cannot_replace_newer_success(
     mocker, tmp_path: Path
 ) -> None:
     """An older failed scan is discarded after a newer successful selection."""
-    from src.errors import AnimeStudioError
-
     show_a = tmp_path / "Show A"
     show_b = tmp_path / "Show B"
     a_started = asyncio.Event()
-    release_a = asyncio.Event()
 
-    async def scan_folder(path: Path) -> LibraryScanOutput:
+    async def scan_folder(
+        path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
         if path == show_a.resolve():
             a_started.set()
-            await release_a.wait()
-            raise AnimeStudioError("old request failed")
+            assert stop_event is not None
+            await stop_event.wait()
+            raise PipelineStoppedError("superseded")
         return _scan_output(show_b, "Show B")
 
     mock_runner = mocker.MagicMock()
@@ -1604,7 +1614,6 @@ async def test_main_window_stale_selection_failure_cannot_replace_newer_success(
     )
     await a_started.wait()
     await window._on_show_selected.__wrapped__(window, "Show B", show_b)
-    release_a.set()
     await task_a
 
     assert window._current_show_path == show_b.resolve()
@@ -1618,16 +1627,18 @@ async def test_main_window_refresh_invalidates_active_show_and_late_scan(
     """Refresh clears active state and prevents an older folder scan from applying."""
     show_path = tmp_path / "Old"
     selection_started = asyncio.Event()
-    release_selection = asyncio.Event()
     refresh_started = asyncio.Event()
     release_refresh = asyncio.Event()
 
-    async def scan_folder(path: Path) -> LibraryScanOutput:
+    async def scan_folder(
+        path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
         selection_started.set()
-        await release_selection.wait()
-        return _scan_output(path, "Old")
+        assert stop_event is not None
+        await stop_event.wait()
+        raise PipelineStoppedError("superseded")
 
-    async def scan_library(path: Path) -> LibraryScanOutput:
+    async def scan_library(path: Path, **_kwargs: object) -> LibraryScanOutput:
         refresh_started.set()
         await release_refresh.wait()
         return LibraryScanOutput(episodes=[], font_directories=[], show_tree=())
@@ -1656,7 +1667,6 @@ async def test_main_window_refresh_invalidates_active_show_and_late_scan(
     assert window._episode_table.get_selected_paths() == []
     assert window.run_button.isEnabled() is False
 
-    release_selection.set()
     await selection_task
     release_refresh.set()
     await refresh_task
@@ -1666,10 +1676,10 @@ async def test_main_window_refresh_invalidates_active_show_and_late_scan(
 
 
 @pytest.mark.asyncio
-async def test_main_window_refresh_failure_leaves_no_stale_show(
+async def test_main_window_refresh_failure_preserves_previous_show(
     mocker, tmp_path: Path
 ) -> None:
-    """A failed refresh must not restore the prior active show."""
+    """A failed refresh must leave the prior valid show usable."""
     from src.errors import AnimeStudioError
 
     mock_runner = mocker.MagicMock()
@@ -1687,8 +1697,8 @@ async def test_main_window_refresh_failure_leaves_no_stale_show(
 
     await window._on_refresh_index.__wrapped__(window)
 
-    assert window._current_show_path is None
-    assert window.run_button.isEnabled() is False
+    assert window._current_show_path == (tmp_path / "Old")
+    assert window.run_button.isEnabled() is True
 
 
 @pytest.mark.asyncio
@@ -1699,13 +1709,15 @@ async def test_main_window_add_folder_late_result_does_not_replace_selection(
     add_path = tmp_path / "Added"
     show_b = tmp_path / "Show B"
     add_started = asyncio.Event()
-    release_add = asyncio.Event()
 
-    async def scan_folder(path: Path) -> LibraryScanOutput:
+    async def scan_folder(
+        path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
         if path == add_path.resolve():
             add_started.set()
-            await release_add.wait()
-            return _scan_output(add_path, "Added")
+            assert stop_event is not None
+            await stop_event.wait()
+            raise PipelineStoppedError("superseded")
         return _scan_output(show_b, "Show B")
 
     mock_runner = mocker.MagicMock()
@@ -1723,10 +1735,9 @@ async def test_main_window_add_folder_late_result_does_not_replace_selection(
     add_task = asyncio.create_task(window._on_add_folder.__wrapped__(window, add_path))
     await add_started.wait()
     await window._on_show_selected.__wrapped__(window, "Show B", show_b)
-    release_add.set()
     await add_task
 
-    mock_index.add_show.assert_awaited_once()
+    mock_index.add_show.assert_not_awaited()
     assert mock_runner.library_scanner.scan_folder.call_count == 2
     assert window._current_show_path == show_b.resolve()
     assert window._show_name_label.text() == "Show B"
@@ -1985,3 +1996,88 @@ async def test_main_window_stale_run_does_not_update_newer_show_table(
         (show_a, ShowStatus.PROCESSING),
         (show_a, ShowStatus.ALL_DONE),
     ]
+
+
+@pytest.mark.asyncio
+async def test_main_window_folder_scan_cancel_is_visible_idempotent_and_neutral(
+    mocker, tmp_path: Path
+) -> None:
+    """The actual Stop surface cancels a folder scan without a pipeline result."""
+    show_path = tmp_path / "Show A"
+    scan_started = asyncio.Event()
+
+    async def scan_folder(
+        path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
+        assert path == show_path.resolve()
+        assert stop_event is not None
+        scan_started.set()
+        await stop_event.wait()
+        raise PipelineStoppedError("folder stop")
+
+    runner = mocker.MagicMock()
+    runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    task = asyncio.create_task(window._on_add_folder.__wrapped__(window, show_path))
+    await scan_started.wait()
+    assert not window.stop_button.isHidden()
+    assert window.stop_button.text() == "Cancel scan"
+    assert window.stop_button.accessibleName() == "Cancel scan"
+
+    window._on_stop_click()
+    assert window.stop_button.text() == "Stopping scan…"
+    window._on_stop_click()
+    await task
+
+    assert window._active_scan is None
+    assert window.progress_panel.status_label.text() == "Folder scan stopped"
+    assert not window.stop_button.isVisible()
+    assert window._sidebar._add_btn.isEnabled()
+    assert window._sidebar.is_refresh_enabled()
+    assert window.run_button.isEnabled() is False
+
+
+@pytest.mark.asyncio
+async def test_main_window_close_requests_folder_scan_cleanup(
+    mocker, tmp_path: Path
+) -> None:
+    """Closing a window requests scan stop and consumes the owned task."""
+    show_path = tmp_path / "Show A"
+    entered = asyncio.Event()
+
+    async def scan_folder(
+        _path: Path, *, stop_event: asyncio.Event | None = None
+    ) -> LibraryScanOutput:
+        assert stop_event is not None
+        entered.set()
+        await stop_event.wait()
+        raise PipelineStoppedError("window closed")
+
+    runner = mocker.MagicMock()
+    runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=scan_folder)
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+    scan_task = asyncio.create_task(
+        window._on_add_folder.__wrapped__(window, show_path)
+    )
+    await entered.wait()
+    close_event = mocker.MagicMock()
+
+    window.closeEvent(close_event)
+    close_event.accept.assert_called_once()
+    await scan_task
+    assert window._close_scan_cleanup_task is not None
+    await window._close_scan_cleanup_task
+    assert window._active_scan is None

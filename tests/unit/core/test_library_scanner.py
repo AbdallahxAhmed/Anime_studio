@@ -515,6 +515,29 @@ def test_parse_embedded_info_empty():
 
 
 @pytest.mark.anyio
+async def test_scan_folder_is_confined_to_selected_show_and_identifies_once(tmp_path):
+    """Add Folder never enumerates or identifies sibling show media."""
+    show_a = tmp_path / "Show A"
+    show_b = tmp_path / "Show B"
+    show_a.mkdir()
+    show_b.mkdir()
+    selected = [show_a / f"a{number}.mkv" for number in range(1, 4)]
+    siblings = [show_b / f"b{number}.mkv" for number in range(1, 3)]
+    for media in [*selected, *siblings]:
+        media.touch()
+
+    mkvmerge = AsyncMock(return_value={"tracks": []})
+    mkvmerge.identify.side_effect = lambda path: {"tracks": []}
+    scanner = LibraryScanner(mkvmerge=mkvmerge)
+
+    result = await scanner.scan_folder(show_a)
+
+    assert result.episodes == []
+    identified = [call.args[0] for call in mkvmerge.identify.call_args_list]
+    assert identified == [path.resolve() for path in selected]
+    assert not set(identified).intersection(path.resolve() for path in siblings)
+
+
 async def test_scan_without_mkvmerge_port(tmp_path):
     """Scanner without mkvmerge port behaves identically to legacy scan_library."""
     anime_dir = tmp_path / "Show A"

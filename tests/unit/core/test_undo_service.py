@@ -133,3 +133,40 @@ async def test_undo_episode_conflict(tmp_path, mock_fs):
     assert result.restored == 0
     assert result.conflicts == 1
     mock_fs.replace_file.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_manifest_windows_paths_round_trip_and_malformed_history_is_skipped(
+    tmp_path, mock_fs
+):
+    """One historical bad TOML file cannot hide a valid Windows-path manifest."""
+    service = UndoService(tmp_path, mock_fs)
+    manifest = RunManifest(
+        run_id="windows-run",
+        timestamp="2026-07-23T00:48:00+00:00",
+        library_path=r"D:\Entertainment\Anime",
+        episodes_processed=(
+            EpisodeProcessed(
+                episode_path=r"D:\Entertainment\Anime\Show A\01.mkv",
+                trash_receipt_path=r"D:\Entertainment\.anime_studio_trash\01.mkv",
+                show_name="Show A",
+                status="success",
+            ),
+        ),
+    )
+    await service.save_manifest(manifest)
+    service.history_dir.mkdir(parents=True, exist_ok=True)
+    malformed = service.history_dir / "run_bad.toml"
+    malformed.write_text('library_path = "D:\\broken\\path"', encoding="utf-8")
+
+    runs = await service.list_runs()
+    assert [run.run_id for run in runs] == ["windows-run"]
+    assert str(runs[0].library_path) == r"D:\Entertainment\Anime"
+    assert str(runs[0].episodes_processed[0].episode_path) == (
+        r"D:\Entertainment\Anime\Show A\01.mkv"
+    )
+
+    # The malformed historical file remains untouched and subsequent loads
+    # continue to expose the valid manifest.
+    assert malformed.is_file()
+    assert [run.run_id for run in await service.list_runs()] == ["windows-run"]

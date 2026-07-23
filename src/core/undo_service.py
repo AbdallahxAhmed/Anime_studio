@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,6 +30,7 @@ class UndoService:
         self.fs = filesystem_port
         self.max_history = max_run_history
         self.history_dir = self.data_dir / "run_history"
+        self._warned_invalid_manifests: set[Path] = set()
 
     async def list_runs(self) -> List[RunManifest]:
         """Read all .toml files from data_dir/run_history/ sorted by timestamp descending, capped at max_history."""
@@ -61,10 +63,15 @@ class UndoService:
                         episodes_processed=episodes,
                     )
                 )
-            except Exception as e:
-                logger.warning(
-                    "Failed to load run manifest", file=file.name, error=str(e)
-                )
+            except (tomllib.TOMLDecodeError, KeyError, TypeError, ValueError) as e:
+                # Historical files are user data.  Keep the bad manifest in
+                # place, omit only that entry, and avoid repeating the same
+                # warning on every Undo/open lifecycle.
+                if file not in self._warned_invalid_manifests:
+                    logger.warning(
+                        "Failed to load run manifest", file=file.name, error=str(e)
+                    )
+                    self._warned_invalid_manifests.add(file)
 
         # Sort by timestamp descending
         manifests.sort(key=lambda m: m.timestamp, reverse=True)
@@ -82,21 +89,25 @@ class UndoService:
         filename = f"run_{ts_clean}.toml"
         filepath = self.history_dir / filename
 
-        # Manual TOML serialization
+        # JSON string literals are valid TOML basic strings and correctly
+        # escape Windows backslashes, quotes, and control characters.
+        toml_string = json.dumps
         lines = [
-            f'run_id = "{manifest.run_id}"',
-            f'timestamp = "{manifest.timestamp}"',
-            f'library_path = "{manifest.library_path}"',
+            f"run_id = {toml_string(manifest.run_id)}",
+            f"timestamp = {toml_string(manifest.timestamp)}",
+            f"library_path = {toml_string(str(manifest.library_path))}",
             "",
         ]
 
         for ep in manifest.episodes_processed:
             lines.append("[[episodes_processed]]")
-            lines.append(f'episode_path = "{ep.episode_path}"')
+            lines.append(f"episode_path = {toml_string(str(ep.episode_path))}")
             if ep.trash_receipt_path:
-                lines.append(f'trash_receipt_path = "{ep.trash_receipt_path}"')
-            lines.append(f'show_name = "{ep.show_name}"')
-            lines.append(f'status = "{ep.status}"')
+                lines.append(
+                    f"trash_receipt_path = {toml_string(str(ep.trash_receipt_path))}"
+                )
+            lines.append(f"show_name = {toml_string(ep.show_name)}")
+            lines.append(f"status = {toml_string(ep.status)}")
             lines.append("")
 
         filepath.write_text("\n".join(lines) + "\n", encoding="utf-8")

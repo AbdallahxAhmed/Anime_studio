@@ -2,7 +2,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from os.path import normcase
 from typing import Any, TYPE_CHECKING
 from pathlib import Path
@@ -40,6 +42,25 @@ from src.models.pipeline import LibraryScanOutput, ShowSummary, ShowStatus
 logger = logging.getLogger("anime_studio.gui.main_window")
 
 
+class DiscoveryScanKind(str, Enum):
+    """The user-visible discovery operations owned by the main window."""
+
+    REFRESH = "refresh"
+    ADD_FOLDER = "add_folder"
+    SHOW_SELECTION = "show_selection"
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveDiscoveryScan:
+    """Immutable identity and cancellation state for one GUI discovery scan."""
+
+    kind: DiscoveryScanKind
+    root: Path
+    generation: int
+    stop_event: asyncio.Event
+    task: asyncio.Task[Any] | None
+
+
 class MainWindow(QMainWindow):
     """The primary QMainWindow for the Anime Studio dashboard.
 
@@ -68,6 +89,9 @@ class MainWindow(QMainWindow):
         self._undo_service = undo_service
         self._pipeline_running = False
         self._is_refreshing = False
+        self._scan_generation = 0
+        self._active_scan: ActiveDiscoveryScan | None = None
+        self._close_scan_cleanup_task: asyncio.Task[None] | None = None
         self._selection_generation = 0
         self._current_show_name: str | None = None
         self._current_show_path: Path | None = None
@@ -293,37 +317,142 @@ class MainWindow(QMainWindow):
         shows = await self._show_index.load()
         self._sidebar.populate(shows)
 
+    def _is_current_scan(self, scan: ActiveDiscoveryScan) -> bool:
+        """Return whether a discovery result is still allowed to mutate the GUI."""
+        return self._active_scan == scan and not scan.stop_event.is_set()
+
+    def _raise_if_scan_stale(self, scan: ActiveDiscoveryScan) -> None:
+        if not self._is_current_scan(scan):
+            raise PipelineStoppedError("Library scan superseded by a newer request")
+
+    async def _stop_active_discovery_scan(self) -> None:
+        """Cooperatively stop and join the previous GUI discovery operation."""
+        active = self._active_scan
+        if active is None:
+            return
+
+        if not active.stop_event.is_set():
+            active.stop_event.set()
+            self._show_scan_stopping(active)
+
+        active_task = active.task
+        current_task = asyncio.current_task()
+        if (
+            active_task is not None
+            and active_task is not current_task
+            and not active_task.done()
+        ):
+            await asyncio.shield(active_task)
+
+    async def _start_discovery_scan(
+        self, kind: DiscoveryScanKind, root: Path
+    ) -> ActiveDiscoveryScan | None:
+        """Replace any earlier discovery scan with a latest-wins operation."""
+        if self._pipeline_running:
+            return None
+
+        await self._stop_active_discovery_scan()
+        self._scan_generation += 1
+        scan = ActiveDiscoveryScan(
+            kind=kind,
+            root=root.expanduser().resolve(),
+            generation=self._scan_generation,
+            stop_event=asyncio.Event(),
+            task=asyncio.current_task(),
+        )
+        self._active_scan = scan
+        self._is_refreshing = kind is DiscoveryScanKind.REFRESH
+        self._show_scan_started(scan)
+        return scan
+
+    def _show_scan_started(self, scan: ActiveDiscoveryScan) -> None:
+        """Render one discovery scan as the active operation, never a pipeline run."""
+        scope = (
+            "full library" if scan.kind is DiscoveryScanKind.REFRESH else scan.root.name
+        )
+        self.progress_panel.setVisible(True)
+        self.progress_panel.progress_bar.setRange(0, 0)
+        self.progress_panel.set_status(f"Scanning {scope}\N{HORIZONTAL ELLIPSIS}")
+        self.stop_button.setText("Cancel scan")
+        self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
+        self.stop_button.setAccessibleName("Cancel scan")
+        self.stop_button.setAccessibleDescription(
+            f"Cancel the active discovery scan for {scope}."
+        )
+        self.stop_button.setToolTip("Cancel the active folder or library scan")
+        self._sidebar.set_navigation_enabled(False)
+        self.settings_btn.setEnabled(False)
+        self.undo_button.setEnabled(False)
+        self._episode_table.setEnabled(False)
+        self.run_button.setEnabled(False)
+
+    def _show_scan_stopping(self, scan: ActiveDiscoveryScan) -> None:
+        """Make discovery cancellation explicit and idempotent."""
+        if self._active_scan != scan:
+            return
+        self.stop_button.setEnabled(False)
+        self.stop_button.setText("Stopping scan\N{HORIZONTAL ELLIPSIS}")
+        self.stop_button.setAccessibleName("Stopping scan")
+        self.stop_button.setAccessibleDescription(
+            "Stopping the active discovery scan after its running work finishes."
+        )
+        self.stop_button.setToolTip("Stopping the active discovery scan")
+        self.progress_panel.set_status("Stopping scan\N{HORIZONTAL ELLIPSIS}")
+
+    def _finish_discovery_scan(
+        self, scan: ActiveDiscoveryScan, outcome: str, error: Exception | None = None
+    ) -> None:
+        """Restore every scan-owned control exactly once for all terminal paths."""
+        if self._active_scan != scan:
+            return
+
+        self._active_scan = None
+        self._is_refreshing = False
+        self.stop_button.setVisible(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setText("Stop")
+        self.stop_button.setAccessibleName("Stop pipeline")
+        self.stop_button.setAccessibleDescription(
+            "Request a safe, cooperative stop for the active pipeline run."
+        )
+        self.stop_button.setToolTip("Stop the active pipeline run")
+        self._sidebar.set_navigation_enabled(not self._pipeline_running)
+        self.settings_btn.setEnabled(not self._pipeline_running)
+        self.undo_button.setEnabled(not self._pipeline_running)
+        self._episode_table.setEnabled(not self._pipeline_running)
+
+        if outcome == "stopped":
+            self.progress_panel.set_stopped()
+            self.progress_panel.set_status("Folder scan stopped")
+        elif outcome == "error":
+            self.progress_panel.set_error()
+            self.progress_panel.set_status(f"Folder scan failed: {error}")
+        else:
+            self.progress_panel.setVisible(False)
+
+        self._on_selection_changed(self._episode_table.get_selected_paths())
+
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_refresh_index(self) -> None:
         """Full refresh scan of config.library_path."""
-        if self._is_refreshing:
-            logger.info("Refresh already in progress, ignoring duplicate request")
-            return
-
         library_path = self.config.library_path
         if not library_path:
             return
 
-        self._invalidate_active_show()
-        self._is_refreshing = True
-        self._sidebar.set_navigation_enabled(False)
-        from datetime import datetime
-
-        self.signal_bridge.log_received.emit(
-            {
-                "event": f"Starting full library rescan for {library_path}...",
-                "level": "info",
-                "timestamp": datetime.now().isoformat(),
-            }
+        scan = await self._start_discovery_scan(
+            DiscoveryScanKind.REFRESH, Path(library_path)
         )
-        self.progress_panel.set_status("Scanning full library...")
-        self.progress_panel.setVisible(True)
-        self.progress_panel.progress_bar.setRange(0, 0)
+        if scan is None:
+            return
+        outcome = "success"
+        scan_error: Exception | None = None
 
         try:
             scan_output = await self.pipeline_runner.library_scanner.scan(
-                Path(library_path)
+                scan.root, stop_event=scan.stop_event
             )
+            self._raise_if_scan_stale(scan)
             shows = []
             for node in scan_output.show_tree:
                 shows.append(
@@ -338,9 +467,10 @@ class MainWindow(QMainWindow):
                         subtitle_text=f"{node.total_count} episodes found",
                     )
                 )
-            self._sidebar.populate(shows)
+            self._raise_if_scan_stale(scan)
             await self._show_index.save(shows)
-            self.progress_panel.setVisible(False)
+            self._raise_if_scan_stale(scan)
+            self._sidebar.populate(shows)
             self.signal_bridge.log_received.emit(
                 {
                     "event": f"Library rescan completed: {len(shows)} shows found.",
@@ -348,10 +478,15 @@ class MainWindow(QMainWindow):
                     "timestamp": datetime.now().isoformat(),
                 }
             )
-        except (AnimeStudioError, OSError) as e:
+        except asyncio.CancelledError:
+            outcome = "stopped"
+            raise
+        except PipelineStoppedError:
+            outcome = "stopped"
+        except (AnimeStudioError, OSError, ValueError, RuntimeError) as e:
+            outcome = "error"
+            scan_error = e
             logger.error(f"Refresh failed: {e}")
-            self.progress_panel.set_error()
-            self.progress_panel.set_status(f"Refresh failed: {e}")
             self.signal_bridge.log_received.emit(
                 {
                     "event": f"Library rescan failed: {e}",
@@ -360,9 +495,7 @@ class MainWindow(QMainWindow):
                 }
             )
         finally:
-            self._is_refreshing = False
-            if not self._pipeline_running:
-                self._sidebar.set_navigation_enabled(True)
+            self._finish_discovery_scan(scan, outcome, scan_error)
 
     def _invalidate_active_show(self) -> int:
         """Clear the active show and return its new selection generation."""
@@ -431,27 +564,32 @@ class MainWindow(QMainWindow):
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_show_selected(self, name: str, path: Path) -> None:
         """Load episodes for selected show into EpisodeTableWidget."""
-        request_generation = self._invalidate_active_show()
-        requested_name = name
         requested_path = Path(path).expanduser().resolve()
-
-        self.progress_panel.set_status("Scanning folder...")
-        self.progress_panel.setVisible(True)
-        self.progress_panel.progress_bar.setRange(0, 0)
+        scan = await self._start_discovery_scan(
+            DiscoveryScanKind.SHOW_SELECTION, requested_path
+        )
+        if scan is None:
+            return
+        outcome = "success"
+        scan_error: Exception | None = None
 
         try:
             scan_output = await self.pipeline_runner.library_scanner.scan_folder(
-                requested_path
+                scan.root, stop_event=scan.stop_event
             )
-            if request_generation != self._selection_generation:
-                return
-            self._display_scan_result(requested_name, requested_path, scan_output)
-        except (AnimeStudioError, OSError) as e:
-            if request_generation != self._selection_generation:
-                return
+            self._raise_if_scan_stale(scan)
+            self._display_scan_result(name, scan.root, scan_output)
+        except asyncio.CancelledError:
+            outcome = "stopped"
+            raise
+        except PipelineStoppedError:
+            outcome = "stopped"
+        except (AnimeStudioError, OSError, ValueError, RuntimeError) as e:
+            outcome = "error"
+            scan_error = e
             logger.error(f"Failed to scan folder: {e}")
-            self.progress_panel.set_error()
-            self.progress_panel.set_status(f"Scan failed: {e}")
+        finally:
+            self._finish_discovery_scan(scan, outcome, scan_error)
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_add_folder(self, path: Path | None = None) -> None:
@@ -478,38 +616,46 @@ class MainWindow(QMainWindow):
             )
             return
 
-        request_generation = self._invalidate_active_show()
-        self.progress_panel.set_status(f"Adding show: {path.name}...")
-        self.progress_panel.setVisible(True)
-        self.progress_panel.progress_bar.setRange(0, 0)
+        scan = await self._start_discovery_scan(
+            DiscoveryScanKind.ADD_FOLDER, path.expanduser().resolve()
+        )
+        if scan is None:
+            return
+        outcome = "success"
+        scan_error: Exception | None = None
 
         try:
-            resolved = path.expanduser().resolve()
             scan_output = await self.pipeline_runner.library_scanner.scan_folder(
-                resolved
+                scan.root, stop_event=scan.stop_event
             )
+            self._raise_if_scan_stale(scan)
             status = (
                 ShowStatus.READY if scan_output.episodes else ShowStatus.NO_SUBTITLE
             )
             summary = ShowSummary(
-                name=resolved.name,
-                path=resolved,
+                name=scan.root.name,
+                path=scan.root,
                 status=status,
                 episode_count=len(scan_output.episodes),
                 processed_count=0,
                 subtitle_text=f"{len(scan_output.episodes)} episodes found",
             )
-            self._sidebar.add_show(summary)
+            self._raise_if_scan_stale(scan)
             await self._show_index.add_show(summary)
-            if request_generation != self._selection_generation:
-                return
-            self._display_scan_result(summary.name, resolved, scan_output)
-        except (AnimeStudioError, OSError) as e:
-            if request_generation != self._selection_generation:
-                return
+            self._raise_if_scan_stale(scan)
+            self._sidebar.add_show(summary)
+            self._display_scan_result(summary.name, scan.root, scan_output)
+        except asyncio.CancelledError:
+            outcome = "stopped"
+            raise
+        except PipelineStoppedError:
+            outcome = "stopped"
+        except (AnimeStudioError, OSError, ValueError, RuntimeError) as e:
+            outcome = "error"
+            scan_error = e
             logger.error(f"Failed to add folder: {e}")
-            self.progress_panel.set_error()
-            self.progress_panel.set_status(f"Failed to add folder: {e}")
+        finally:
+            self._finish_discovery_scan(scan, outcome, scan_error)
 
     def _on_selection_changed(self, paths: list[Path]) -> None:
         count = len(paths)
@@ -525,6 +671,7 @@ class MainWindow(QMainWindow):
             and self._current_show_path is not None
             and self._current_show_name is not None
             and not self._pipeline_running
+            and self._active_scan is None
         )
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
@@ -547,7 +694,7 @@ class MainWindow(QMainWindow):
             for path in self._episode_table.get_selected_paths()
         )
 
-        if self._pipeline_running:
+        if self._pipeline_running or self._active_scan is not None:
             return
 
         if run_show_path is None or run_show_name is None:
@@ -756,11 +903,18 @@ class MainWindow(QMainWindow):
             self.undo_button.setEnabled(True)
             self.settings_btn.setEnabled(True)
             self._episode_table.setEnabled(True)
-            self._sidebar.set_navigation_enabled(not self._is_refreshing)
+            self._sidebar.set_navigation_enabled(self._active_scan is None)
             self._on_selection_changed(self._episode_table.get_selected_paths())
 
     def _on_stop_click(self) -> None:
-        """Handle Stop button click by setting the stop event."""
+        """Cancel the active discovery scan or stop the active pipeline run."""
+        active_scan = self._active_scan
+        if active_scan is not None:
+            if not active_scan.stop_event.is_set():
+                active_scan.stop_event.set()
+                self._show_scan_stopping(active_scan)
+            return
+
         if self._stop_event and not self._stop_event.is_set():
             self._stop_event.set()
             self.stop_button.setEnabled(False)
@@ -971,15 +1125,26 @@ class MainWindow(QMainWindow):
         )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        """Use Escape as a safe Stop shortcut only while a pipeline is active."""
-        if event.key() == Qt.Key.Key_Escape and self._pipeline_running:
-            self._on_stop_click()
-            event.accept()
-            return
+        """Use Escape for the one user-visible operation that owns Stop."""
+        if event.key() == Qt.Key.Key_Escape:
+            if self._active_scan is not None or self._pipeline_running:
+                self._on_stop_click()
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def closeEvent(self, event: Any) -> None:
         """Override close event to confirm exit if pipeline is active."""
+        active_scan = self._active_scan
+        if active_scan is not None:
+            self._on_stop_click()
+            if active_scan.task is not None and not active_scan.task.done():
+                self._close_scan_cleanup_task = asyncio.create_task(
+                    self._join_scan_on_close(active_scan)
+                )
+            event.accept()
+            return
+
         if self._pipeline_running:
             reply = QMessageBox.question(
                 self,
@@ -997,6 +1162,20 @@ class MainWindow(QMainWindow):
         else:
             logger.info("Application closing gracefully")
             event.accept()
+
+    async def _join_scan_on_close(self, scan: ActiveDiscoveryScan) -> None:
+        """Consume the scan task after close requests cooperative cancellation."""
+        task = scan.task
+        if task is None or task is asyncio.current_task():
+            return
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The scan lifecycle renders and logs its own errors; this join only
+            # guarantees the owned task is consumed before Qt exits.
+            return
 
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_import_fonts_click(self) -> None:
