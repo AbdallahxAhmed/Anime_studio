@@ -44,3 +44,18 @@ class GuiLogBridge(QObject):
 
     def get_session_entries(self) -> list[dict[str, Any]]:
         return list(self._session_buffer)
+
+    def record(self, entry: dict[str, Any]) -> None:
+        """Explicitly record a log entry into the session buffer and emit signal."""
+        event_copy = entry.copy()
+        level = str(event_copy.get("level", "info")).lower()
+        event_copy["level"] = level
+        if "timestamp" not in event_copy:
+            from datetime import datetime
+
+            event_copy["timestamp"] = datetime.now().isoformat()
+
+        self.log_received.emit(event_copy)
+
+        if len(self._session_buffer) < self._buffer_cap:
+            self._session_buffer.append(event_copy)

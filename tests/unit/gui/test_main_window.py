@@ -30,8 +30,17 @@ def q_app() -> QApplication:
 class MockLogBridge(QObject):
     log_received = Signal(dict)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.entries: list[dict[str, object]] = []
+
+    def record(self, entry: dict[str, object]) -> None:
+        entry_copy = entry.copy()
+        self.entries.append(entry_copy)
+        self.log_received.emit(entry_copy)
+
     def get_session_log(self) -> list:
-        return []
+        return list(self.entries)
 
 
 class MockConfig:
@@ -1049,9 +1058,10 @@ async def test_main_window_stop_restoration_failure_is_bounded_and_neutral(
     mock_index = mocker.MagicMock(spec=MockIndexManager)
     mock_index.update_status = mocker.AsyncMock(side_effect=update_status)
     error_dialog = mocker.patch("src.gui.widgets.error_dialog.show_error_dialog")
+    log_bridge = MockLogBridge()
     window = MainWindow(
         pipeline_runner=mock_runner,
-        log_bridge=MockLogBridge(),
+        log_bridge=log_bridge,
         config=MockConfig(tmp_path),
         font_ingestion_service=mocker.MagicMock(),
         show_index_manager=mock_index,
@@ -1088,6 +1098,10 @@ async def test_main_window_stop_restoration_failure_is_bounded_and_neutral(
         if "Could not restore show status after user stop" in record.getMessage()
     ]
     assert len(restore_warnings) == 1
+    assert [entry["event"] for entry in log_bridge.get_session_log()] == [
+        "Pipeline stop requested",
+        "Pipeline stopped by user",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1152,7 +1166,86 @@ async def test_main_window_treats_late_success_after_stop_as_neutral(
         (show_path.resolve(), ShowStatus.PROCESSING),
         (show_path.resolve(), ShowStatus.READY),
     ]
-    assert [event["event"] for event in stopped_events] == ["Pipeline stopped by user."]
+    assert [event["event"] for event in stopped_events] == [
+        "Pipeline stop requested",
+        "Pipeline stopped by user",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_main_window_stop_events_persist_across_a_deliberate_second_run(
+    mocker, tmp_path: Path
+) -> None:
+    """A stopped run stays exportable after the user starts a later successful run."""
+    first_run_started = asyncio.Event()
+    calls = 0
+
+    async def run_pipeline(*_args: object, **kwargs: object) -> PipelineReport:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            stop_event = kwargs["stop_event"]
+            assert isinstance(stop_event, asyncio.Event)
+            first_run_started.set()
+            await stop_event.wait()
+        return PipelineReport(
+            run_timestamp=datetime.now(timezone.utc),
+            duration_ms=1.0,
+            anime_title="Stopped Show",
+            episodes=[],
+            total_fonts_found=0,
+            genuine_misses=[],
+        )
+
+    log_bridge = MockLogBridge()
+    runner = mocker.MagicMock()
+    runner.run = mocker.AsyncMock(side_effect=run_pipeline)
+    index = mocker.MagicMock(spec=MockIndexManager)
+    index.update_status = mocker.AsyncMock()
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=log_bridge,
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=index,
+    )
+    show_path = tmp_path / "Stopped Show"
+    _set_active_show(window, show_path, "Stopped Show")
+    window._sidebar.add_show(
+        ShowSummary(
+            name="Stopped Show",
+            path=show_path.resolve(),
+            status=ShowStatus.READY,
+            episode_count=1,
+            processed_count=0,
+            subtitle_text="1 episode found",
+        )
+    )
+
+    first_task = asyncio.create_task(window._on_run_click.__wrapped__(window))
+    await first_run_started.wait()
+    window._on_stop_click()
+    window._on_stop_click()
+    await first_task
+    assert window.run_button.isEnabled()
+
+    await window._on_run_click.__wrapped__(window)
+
+    events = [str(entry["event"]) for entry in log_bridge.get_session_log()]
+    assert events.count("Pipeline stop requested") == 1
+    assert events.count("Pipeline stopped by user") == 1
+    assert "Pipeline failed" not in events
+    assert (
+        window.progress_panel.status_label.text() == "Pipeline executed successfully!"
+    )
+
+    from src.core.log_export import export_log_to_file
+
+    export_path = tmp_path / "stop-sequence.txt"
+    await export_log_to_file(log_bridge.get_session_log(), export_path)
+    exported = export_path.read_text(encoding="utf-8")
+    assert "Pipeline stop requested" in exported
+    assert "Pipeline stopped by user" in exported
 
 
 @pytest.mark.asyncio
@@ -2042,6 +2135,10 @@ async def test_main_window_folder_scan_cancel_is_visible_idempotent_and_neutral(
     assert window._sidebar._add_btn.isEnabled()
     assert window._sidebar.is_refresh_enabled()
     assert window.run_button.isEnabled() is False
+    assert [entry["event"] for entry in window._log_bridge.get_session_log()] == [
+        "Folder scan stop requested",
+        "Folder scan stopped",
+    ]
 
 
 @pytest.mark.asyncio

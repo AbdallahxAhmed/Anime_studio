@@ -423,6 +423,7 @@ class MainWindow(QMainWindow):
         self._episode_table.setEnabled(not self._pipeline_running)
 
         if outcome == "stopped":
+            self._record_scan_stopped(scan)
             self.progress_panel.set_stopped()
             self.progress_panel.set_status("Folder scan stopped")
         elif outcome == "error":
@@ -837,6 +838,9 @@ class MainWindow(QMainWindow):
         except asyncio.CancelledError:
             raise
         except PipelineStoppedError:
+            # Record the terminal neutral outcome before restoration so a
+            # secondary status-write failure cannot suppress export evidence.
+            self._record_pipeline_stopped()
             is_current_run_show = (
                 run_generation == self._selection_generation
                 and run_show_path == self._current_show_path
@@ -861,13 +865,6 @@ class MainWindow(QMainWindow):
                         "Could not restore show status after user stop: %s",
                         restore_error,
                     )
-            self.signal_bridge.log_received.emit(
-                {
-                    "event": "Pipeline stopped by user.",
-                    "level": "info",
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
         except (AnimeStudioError, OSError, ValueError, RuntimeError) as e:
             logger.error(f"Forensics pipeline execution failed: {e}")
             self.signal_bridge.progress_updated.emit(
@@ -906,17 +903,72 @@ class MainWindow(QMainWindow):
             self._sidebar.set_navigation_enabled(self._active_scan is None)
             self._on_selection_changed(self._episode_table.get_selected_paths())
 
+    def _record_log_event(self, entry: dict[str, Any]) -> None:
+        """Durable, thread-safe recording of an event into session log and activity feed."""
+        entry_copy = entry.copy()
+        if "level" not in entry_copy:
+            entry_copy["level"] = "info"
+        if "timestamp" not in entry_copy:
+            entry_copy["timestamp"] = datetime.now().isoformat()
+
+        if hasattr(self._log_bridge, "record") and callable(
+            getattr(self._log_bridge, "record")
+        ):
+            self._log_bridge.record(entry_copy)
+        elif callable(self._log_bridge):
+            self._log_bridge(logger, "info", entry_copy)
+        else:
+            self.signal_bridge.log_received.emit(entry_copy)
+
+    def _record_pipeline_stop_requested(self) -> None:
+        self._record_log_event(
+            {
+                "event": "Pipeline stop requested",
+                "level": "info",
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    def _record_pipeline_stopped(self) -> None:
+        self._record_log_event(
+            {
+                "event": "Pipeline stopped by user",
+                "level": "info",
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    def _record_scan_stop_requested(self, scan: ActiveDiscoveryScan) -> None:
+        self._record_log_event(
+            {
+                "event": "Folder scan stop requested",
+                "level": "info",
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    def _record_scan_stopped(self, scan: ActiveDiscoveryScan) -> None:
+        self._record_log_event(
+            {
+                "event": "Folder scan stopped",
+                "level": "info",
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
     def _on_stop_click(self) -> None:
         """Cancel the active discovery scan or stop the active pipeline run."""
         active_scan = self._active_scan
         if active_scan is not None:
             if not active_scan.stop_event.is_set():
                 active_scan.stop_event.set()
+                self._record_scan_stop_requested(active_scan)
                 self._show_scan_stopping(active_scan)
             return
 
         if self._stop_event and not self._stop_event.is_set():
             self._stop_event.set()
+            self._record_pipeline_stop_requested()
             self.stop_button.setEnabled(False)
             self.stop_button.setText("Stopping...")
             self.stop_button.setAccessibleName("Stopping pipeline")
