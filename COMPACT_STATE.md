@@ -1,35 +1,28 @@
 # COMPACT_STATE.md — Anime Studio v3
 
-**Last Updated**: 2026-07-24
-**Active Branch**: `011-gui-redesign`
-**Pre-Docs Final Implementation HEAD**: `fb3e95c8c9205e9ca8352ead9a80d6d83f67072a`
+**Last Updated**: 2026-10-03
+**Active Branch**: `main`
+**HEAD**: `eca56b5`
 **Constitution**: v1.9.0
-**Status**: Phase 8 COMPLETE — HUMAN MANUAL PASS ✅ | 386 tests passed | Ruff, format, mypy --strict passed | **Next: Maintainer Push Decision**
+**Status**: Feature 013 & Embedded Pipeline COMPLETE — MERGED & PUSHED TO MAIN ✅ | 820 tests passed | Ruff, format, mypy --strict passed | Live media verified
 
 ---
 
 ## 🚨 CRITICAL — Read Before Starting Any Session
 
-### Phase 8 Final Baseline
+### Production Baseline
 
-- **Human Verdict**: PHASE 8 HUMAN MANUAL PASS
-- **Branch**: `011-gui-redesign`
-- **Pre-Docs Final Implementation HEAD**: `fb3e95c8c9205e9ca8352ead9a80d6d83f67072a`
+- **Human Verdict**: PHASE 8 + FEATURE 013 MERGED TO MAIN
+- **Branch**: `main`
+- **HEAD**: `eca56b5`
 - **Automated Baseline**:
-  - Python 3.11.15
-  - 386 tests passed
+  - Python 3.11.9
+  - 820 tests passed
   - `ruff check .` passed
   - `ruff format --check .` passed
-  - `mypy --strict` passed across 73 source files
-- **Recovery Ref** (preserve through Push):
-  `recovery/phase8-stop-logging-264ea4b` → `264ea4bbd758ef83abd49a4e2d6e978a22dc79ff`
-- **Verification Worktrees** (preserve through Push):
-  - `D:\Dev\projects\Anime_studio_verify_ultra_closure`
-  - `D:\Dev\projects\Anime_studio_verify_phase8_folder_scan`
-  - `D:\Dev\projects\Anime_studio_verify_phase8_stop_logging`
-  - `D:\Dev\projects\Anime_studio_verify_phase8_stop_synthesis`
-- **Phase 8 must not be reopened without new evidence.**
-- **Next action**: Maintainer's explicit Push decision.
+  - `mypy --strict` passed across 81 source files
+- **Live Verification**:
+  - *Serial Experiments Lain*: 13/13 episodes with embedded `und` subtitles extracted, synced with `alass`, fonts resolved (10/10), and remuxed with `mkvmerge` (clean undo backup preserved).
 
 ### Documented Verification Warning
 - `tests/unit/adapters/test_subprocess.py::test_subprocess_timeout[asyncio]`
@@ -59,13 +52,9 @@
 | Phase 6.6 — Font Hunter Chain | ✅ DONE | 10 hunters, 231 tests |
 | Phase 7 — Pre-Packaging UX | ✅ DONE | Selective run tree, export logs, `_amux_` temp fix |
 | Phase 7.5 — Pipeline Control | ✅ DONE | Smart Stop, Checkpoint, Multi-level Undo |
-| **Phase 8a GUI Redesign Wave 1** | ✅ DONE | Domain models — `ShowStatus` and `ShowSummary`, with tests |
-| **Phase 8a GUI Redesign Wave 2** | ✅ DONE | New GUI widgets — `ShowSidebarWidget` and `EpisodeTableWidget`, with tests |
-| **Phase 8a GUI Redesign Wave 3** | ✅ DONE | Core indexing/scanning — `ShowIndexManager` and `LibraryScanner.scan_folder()`, with tests |
-| **Phase 8a GUI Redesign Wave 4** | ✅ DONE | Modify widgets — collapsible `ActivityFeedWidget` and simplified `ProgressPanelWidget` |
-| **Phase 8a GUI Redesign Wave 5** | ✅ DONE | `MainWindow` & `bootstrap.py` rewrite, explicit Refresh, Stop/Undo/closeEvent/drag-drop preservation, full-path `EpisodeResult` contract, regression tests |
-| **Phase 8a GUI Redesign Wave 6** | ✅ DONE | Legacy `selection_tree.py` and `library_picker.py` removed; widget exports updated |
-| **Phase 8a GUI Redesign Wave 7** | ✅ DONE | Full verification: ruff, mypy --strict, 386 tests passed, boundary tests passed |
+| **Phase 8a GUI Redesign** | ✅ DONE | Waves 1–7 complete: two-panel layout, sidebar, episode table, responsive feed |
+| **Feature 013 — Renderability Engine** | ✅ DONE | 374 new tests: libass-compatible font coverage, OpenType cmap, fallback selection |
+| **Feature 013+ — Embedded Subtitles** | ✅ DONE | Embedded ASS extraction, track selection, deduplicated muxing, folder scan caching |
 | Phase 8b — Packaging (.exe) | 📋 PLANNED | PyInstaller spec for Windows .exe |
 | Phase 9 — Settings UI | 📋 PLANNED | Visual config.toml editor + QDialog |
 | Phase 10 — Subtitle Downloader | 📋 PLANNED | SubDL API — deferred to v3.1 |
