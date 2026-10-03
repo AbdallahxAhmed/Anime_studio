@@ -7,6 +7,7 @@ from src.models.font import FontQuery, FontAsset
 from src.models.subtitle import SubtitleSource, SyncResult
 from src.models.mux import MuxJob, MuxResult
 from src.models.trash import TrashReceipt
+from src.models.renderability import RenderabilityReport
 from src.models.report import EpisodeStatus
 
 
@@ -81,6 +82,7 @@ class EpisodeContext(BaseModel):
     mux_job: MuxJob | None = None
     mux_result: MuxResult | None = None
     trash_receipts: list[TrashReceipt] = Field(default_factory=list)
+    renderability_report: RenderabilityReport | None = None
     status: EpisodeStatus = EpisodeStatus.FAILED
     errors: list[str] = Field(default_factory=list)
 

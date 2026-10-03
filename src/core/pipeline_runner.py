@@ -18,6 +18,7 @@ from src.core.font_ingestion import FontIngestionService
 from src.core.mux_planner import plan_mux
 from src.core.report_writer import render_report, render_incremental_section
 from src.core.library_scanner import LibraryScanner
+from src.core.renderability_service import RenderabilityService
 from src.ports.subprocess import SubprocessPort
 from src.ports.filesystem import FilesystemPort
 from src.adapters.dependency_checker import ToolRegistry
@@ -120,6 +121,7 @@ class PipelineRunner:
         font_ingestion_service: FontIngestionService,
         disk_semaphore: asyncio.Semaphore,
         library_scanner: LibraryScanner,
+        renderability_service: RenderabilityService | None = None,
     ) -> None:
         self.font_resolver = font_resolver
         self.subprocess_adapter = subprocess_adapter
@@ -129,6 +131,7 @@ class PipelineRunner:
         self.font_ingestion_service = font_ingestion_service
         self.disk_semaphore = disk_semaphore
         self.library_scanner = library_scanner
+        self.renderability_service = renderability_service
         self._analysis_lock = asyncio.Lock()
 
     async def run(
@@ -573,6 +576,7 @@ class PipelineRunner:
                     mux_result=ctx.mux_result,
                     missing_fonts=ctx.missing_fonts,
                     applied_rules=ctx.errors,  # Store errors/applied rules context
+                    renderability_report=ctx.renderability_report,
                 )
             )
 
@@ -861,6 +865,9 @@ class PipelineRunner:
                 }
             )
 
+            # 4b. Renderability forensics (advisory: never blocks the mux)
+            ctx = await self._assess_renderability(ctx, stop_event=stop_event)
+
             # 5. Plan Mux
             _raise_if_stopped(stop_event)
             temp_mkv_path = scan.episode_path.with_name(
@@ -871,6 +878,37 @@ class PipelineRunner:
             ctx = ctx.model_copy(update={"mux_job": job})
 
             return ctx
+
+    async def _assess_renderability(
+        self,
+        ctx: EpisodeContext,
+        *,
+        stop_event: asyncio.Event | None = None,
+    ) -> EpisodeContext:
+        """Attach a RenderabilityReport judging the fonts that are about to be muxed.
+
+        Read-only and advisory: a failure is logged and never changes the
+        episode's status or errors.  Does nothing when no service is wired.
+        """
+        service = self.renderability_service
+        if service is None or ctx.repaired_content is None:
+            return ctx
+        _raise_if_stopped(stop_event)
+        try:
+            report = await service.analyse(
+                episode_path=ctx.scan_result.episode_path,
+                subtitle_content=ctx.repaired_content,
+                font_paths=[asset.file_path for asset in ctx.resolved_fonts],
+            )
+        except (OSError, ValueError) as e:
+            logger.warning(
+                "renderability analysis failed",
+                episode=ctx.scan_result.episode_path.name,
+                error=str(e),
+            )
+            return ctx
+        _raise_if_stopped(stop_event)
+        return ctx.model_copy(update={"renderability_report": report})
 
     async def _sync_subtitle(
         self,
