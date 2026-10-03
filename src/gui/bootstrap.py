@@ -200,6 +200,10 @@ def bootstrap_app(app: QApplication) -> Any:
     RenderabilityService = core_renderability.RenderabilityService
     renderability_service = RenderabilityService(FontFaceReaderAdapter())
 
+    adapters_mkvextract = importlib.import_module("src.adapters.mkvextract")
+    MkvextractAdapter = adapters_mkvextract.MkvextractAdapter
+    mkvextract_adapter = MkvextractAdapter(subprocess_port=subprocess_adapter)
+
     core_runner = importlib.import_module("src.core.pipeline_runner")
     PipelineRunner = core_runner.PipelineRunner
     pipeline_runner = PipelineRunner(
@@ -212,6 +216,7 @@ def bootstrap_app(app: QApplication) -> Any:
         disk_semaphore=disk_semaphore,
         library_scanner=library_scanner,
         renderability_service=renderability_service,
+        mkvextract_adapter=mkvextract_adapter,
     )
 
     # 4. Create log bridge

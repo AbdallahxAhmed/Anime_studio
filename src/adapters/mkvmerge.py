@@ -19,9 +19,12 @@ class MkvmergeAdapter:
             "mkvmerge",
             "-o",
             str(job.output_path),
-            str(job.episode_path),
-            str(job.subtitle_path),
         ]
+        if job.replace_embedded_subtitles:
+            args.extend(["--no-subtitles", str(job.episode_path)])
+        else:
+            args.append(str(job.episode_path))
+        args.append(str(job.subtitle_path))
         for font in job.fonts:
             args.extend(["--attach-file", str(font.file_path)])
 

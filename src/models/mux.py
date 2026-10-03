@@ -14,6 +14,7 @@ class MuxJob(BaseModel):
     fonts: list[FontAsset]
     dry_run: bool = False
     output_path: SerializablePath
+    replace_embedded_subtitles: bool = False
 
     def plan_trash_disposal(
         self, timestamp: datetime, max_age_days: int

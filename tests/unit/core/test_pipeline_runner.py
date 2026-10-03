@@ -20,7 +20,11 @@ from src.models.pipeline import (
     LibraryScanResult,
     PipelineConfig,
     LibraryScanOutput,
+    EmbeddedSubInfo,
+    EmbeddedTrack,
 )
+from src.models.subtitle import SubtitleSource
+from src.ports.mkvextract import MkvextractPort
 from src.models.report import EpisodeStatus
 from src.models.font import FontAsset
 from src.models.tool_result import ToolResult
@@ -116,6 +120,7 @@ def _make_runner(
     mock_font_ingestion_service,
     disk_semaphore,
     app_config,
+    mkvextract_adapter: MkvextractPort | None = None,
 ) -> PipelineRunner:
     return PipelineRunner(
         font_resolver=mock_font_resolver,
@@ -126,6 +131,7 @@ def _make_runner(
         font_ingestion_service=mock_font_ingestion_service,
         disk_semaphore=disk_semaphore,
         library_scanner=_make_mock_scanner(scan_output),
+        mkvextract_adapter=mkvextract_adapter,
     )
 
 
@@ -1490,3 +1496,270 @@ async def test_pipeline_runner_stop_after_empty_report_write_never_returns_repor
         mock_filesystem.write_file_atomic.await_args.args[0].name
         == "_AnimeStudio_Report.md"
     )
+
+
+def test_pipeline_runner_select_track(
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    runner = _make_runner(
+        LibraryScanOutput(episodes=[], font_directories=[]),
+        mock_font_resolver,
+        mock_subprocess,
+        mock_filesystem,
+        mock_tool_registry,
+        mock_font_ingestion_service,
+        disk_semaphore,
+        app_config,
+    )
+
+    # Empty tracks -> None
+    empty_info = EmbeddedSubInfo(tracks=[])
+    assert runner._select_track(empty_info, "ara", strict=False) is None
+
+    # Exact match on language
+    t_eng = EmbeddedTrack(track_id=0, language="eng", is_default=True)
+    t_ara = EmbeddedTrack(track_id=1, language="ara", is_default=False)
+    info1 = EmbeddedSubInfo(tracks=[t_eng, t_ara])
+    assert runner._select_track(info1, "ara", strict=True) == t_ara
+
+    # Match on language_ietf
+    t_ietf_ar = EmbeddedTrack(
+        track_id=2, language="", language_ietf="ar", is_default=False
+    )
+    info2 = EmbeddedSubInfo(tracks=[t_eng, t_ietf_ar])
+    assert runner._select_track(info2, "ara", strict=True) == t_ietf_ar
+
+    # Strict mode mismatch -> None
+    info3 = EmbeddedSubInfo(tracks=[t_eng])
+    assert runner._select_track(info3, "ara", strict=True) is None
+
+    # Non-strict fallback to default track
+    t_und_default = EmbeddedTrack(track_id=0, language="und", is_default=True)
+    t_und_other = EmbeddedTrack(track_id=1, language="und", is_default=False)
+    info4 = EmbeddedSubInfo(tracks=[t_und_other, t_und_default])
+    assert runner._select_track(info4, "ara", strict=False) == t_und_default
+
+    # Non-strict fallback to first track if none is default
+    info5 = EmbeddedSubInfo(tracks=[t_und_other])
+    assert runner._select_track(info5, "ara", strict=False) == t_und_other
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_embedded_subtitle_extracted_and_processed(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    episode_path = tmp_path / "lain_01.mkv"
+    episode_path.touch()
+
+    track = EmbeddedTrack(track_id=2, language="und", is_default=True)
+    sub_info = EmbeddedSubInfo(tracks=[track])
+
+    scan_result = LibraryScanResult(
+        episode_path=episode_path,
+        subtitle_path=None,
+        subtitle_source=SubtitleSource.EMBEDDED,
+        anime_title="Serial Experiments Lain",
+        embedded_sub_info=sub_info,
+    )
+
+    mock_mkvextract = MagicMock(spec=MkvextractPort)
+
+    async def _mock_extract(mkv, track_id, out_path, timeout=120.0):
+        # Create a valid ASS subtitle at out_path
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(
+            "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default, Arial\n\n[Events]\nDialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,Present Day, Present Time\n",
+            encoding="utf-8",
+        )
+        return ToolResult(
+            tool_name="mkvextract",
+            success=True,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_ms=10.0,
+        )
+
+    mock_mkvextract.extract_track = AsyncMock(side_effect=_mock_extract)
+
+    runner = _make_runner(
+        LibraryScanOutput(episodes=[scan_result], font_directories=[]),
+        mock_font_resolver,
+        mock_subprocess,
+        mock_filesystem,
+        mock_tool_registry,
+        mock_font_ingestion_service,
+        disk_semaphore,
+        app_config,
+        mkvextract_adapter=mock_mkvextract,
+    )
+
+    report = await runner.run(PipelineConfig(library_path=tmp_path))
+
+    assert mock_mkvextract.extract_track.await_count == 1
+    call_args = mock_mkvextract.extract_track.await_args[0]
+    assert call_args[0] == episode_path
+    assert call_args[1] == 2  # track_id
+
+    # The episode report should be COMPLETE
+    ep_report = next(e for e in report.episodes if e.episode_path == episode_path)
+    assert ep_report.status == EpisodeStatus.COMPLETE
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_embedded_subtitle_no_adapter_skipped(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    episode_path = tmp_path / "lain_02.mkv"
+    episode_path.touch()
+
+    track = EmbeddedTrack(track_id=0, language="und", is_default=True)
+    scan_result = LibraryScanResult(
+        episode_path=episode_path,
+        subtitle_path=None,
+        subtitle_source=SubtitleSource.EMBEDDED,
+        anime_title="Serial Experiments Lain",
+        embedded_sub_info=EmbeddedSubInfo(tracks=[track]),
+    )
+
+    # mkvextract_adapter is None
+    runner = _make_runner(
+        LibraryScanOutput(episodes=[scan_result], font_directories=[]),
+        mock_font_resolver,
+        mock_subprocess,
+        mock_filesystem,
+        mock_tool_registry,
+        mock_font_ingestion_service,
+        disk_semaphore,
+        app_config,
+        mkvextract_adapter=None,
+    )
+
+    report = await runner.run(PipelineConfig(library_path=tmp_path))
+
+    ep_report = next(e for e in report.episodes if e.episode_path == episode_path)
+    assert ep_report.status == EpisodeStatus.SKIPPED
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_embedded_subtitle_extraction_failure_skipped(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+    app_config,
+):
+    episode_path = tmp_path / "lain_03.mkv"
+    episode_path.touch()
+
+    track = EmbeddedTrack(track_id=1, language="und", is_default=True)
+    scan_result = LibraryScanResult(
+        episode_path=episode_path,
+        subtitle_path=None,
+        subtitle_source=SubtitleSource.EMBEDDED,
+        anime_title="Serial Experiments Lain",
+        embedded_sub_info=EmbeddedSubInfo(tracks=[track]),
+    )
+
+    mock_mkvextract = MagicMock(spec=MkvextractPort)
+    mock_mkvextract.extract_track = AsyncMock(
+        return_value=ToolResult(
+            tool_name="mkvextract",
+            success=False,
+            exit_code=2,
+            stdout="",
+            stderr="Failed to extract track",
+            duration_ms=10.0,
+        )
+    )
+
+    runner = _make_runner(
+        LibraryScanOutput(episodes=[scan_result], font_directories=[]),
+        mock_font_resolver,
+        mock_subprocess,
+        mock_filesystem,
+        mock_tool_registry,
+        mock_font_ingestion_service,
+        disk_semaphore,
+        app_config,
+        mkvextract_adapter=mock_mkvextract,
+    )
+
+    report = await runner.run(PipelineConfig(library_path=tmp_path))
+
+    ep_report = next(e for e in report.episodes if e.episode_path == episode_path)
+    assert ep_report.status == EpisodeStatus.SKIPPED
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_embedded_subtitle_strict_mismatch_skipped(
+    tmp_path,
+    mock_font_resolver,
+    mock_subprocess,
+    mock_filesystem,
+    mock_tool_registry,
+    mock_font_ingestion_service,
+    disk_semaphore,
+):
+    from src.config import SubtitleConfig
+
+    episode_path = tmp_path / "lain_04.mkv"
+    episode_path.touch()
+
+    track = EmbeddedTrack(track_id=1, language="und", is_default=True)
+    scan_result = LibraryScanResult(
+        episode_path=episode_path,
+        subtitle_path=None,
+        subtitle_source=SubtitleSource.EMBEDDED,
+        anime_title="Serial Experiments Lain",
+        embedded_sub_info=EmbeddedSubInfo(tracks=[track]),
+    )
+
+    config = AppConfig(
+        max_concurrent_disk_io=2,
+        subtitle=SubtitleConfig(preferred_language="ara", strict_language=True),
+    )
+
+    mock_mkvextract = MagicMock(spec=MkvextractPort)
+    mock_mkvextract.extract_track = AsyncMock()
+
+    runner = _make_runner(
+        LibraryScanOutput(episodes=[scan_result], font_directories=[]),
+        mock_font_resolver,
+        mock_subprocess,
+        mock_filesystem,
+        mock_tool_registry,
+        mock_font_ingestion_service,
+        disk_semaphore,
+        config,
+        mkvextract_adapter=mock_mkvextract,
+    )
+
+    report = await runner.run(PipelineConfig(library_path=tmp_path))
+
+    assert mock_mkvextract.extract_track.await_count == 0
+    ep_report = next(e for e in report.episodes if e.episode_path == episode_path)
+    assert ep_report.status == EpisodeStatus.SKIPPED

@@ -1,6 +1,6 @@
 import asyncio
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from os.path import normcase
 import time
 from typing import Any, Literal
@@ -8,7 +8,13 @@ from pathlib import Path
 import shutil
 import structlog
 
-from src.models.pipeline import LibraryScanResult, EpisodeContext, PipelineConfig
+from src.models.pipeline import (
+    LibraryScanResult,
+    EpisodeContext,
+    PipelineConfig,
+    EmbeddedSubInfo,
+    EmbeddedTrack,
+)
 from src.models.report import EpisodeStatus, EpisodeReport, PipelineReport
 from src.models.subtitle import SubtitleFile, SubtitleSource, SyncResult
 from src.models.mux import MuxResult
@@ -21,6 +27,7 @@ from src.core.library_scanner import LibraryScanner
 from src.core.renderability_service import RenderabilityService
 from src.ports.subprocess import SubprocessPort
 from src.ports.filesystem import FilesystemPort
+from src.ports.mkvextract import MkvextractPort
 from src.adapters.dependency_checker import ToolRegistry
 from src.config import AppConfig
 from src.errors import FontMatchError, PipelineStoppedError
@@ -122,6 +129,7 @@ class PipelineRunner:
         disk_semaphore: asyncio.Semaphore,
         library_scanner: LibraryScanner,
         renderability_service: RenderabilityService | None = None,
+        mkvextract_adapter: MkvextractPort | None = None,
     ) -> None:
         self.font_resolver = font_resolver
         self.subprocess_adapter = subprocess_adapter
@@ -132,7 +140,41 @@ class PipelineRunner:
         self.disk_semaphore = disk_semaphore
         self.library_scanner = library_scanner
         self.renderability_service = renderability_service
+        self.mkvextract_adapter = mkvextract_adapter
         self._analysis_lock = asyncio.Lock()
+
+    def _select_track(
+        self,
+        info: EmbeddedSubInfo,
+        preferred_language: str,
+        strict: bool,
+    ) -> EmbeddedTrack | None:
+        """Select the best embedded track based on language preference."""
+        if not info.tracks:
+            return None
+
+        pref_lower = preferred_language.lower()
+        candidates = [
+            t
+            for t in info.tracks
+            if (t.language and t.language.lower() == pref_lower)
+            or (t.language_ietf and t.language_ietf.lower() == pref_lower)
+            or (pref_lower == "ara" and t.language_ietf.lower().startswith("ar"))
+        ]
+
+        if candidates:
+            defaults = [t for t in candidates if t.is_default]
+            if defaults:
+                return defaults[0]
+            return candidates[0]
+
+        if strict:
+            return None
+
+        defaults = [t for t in info.tracks if t.is_default]
+        if defaults:
+            return defaults[0]
+        return info.tracks[0]
 
     async def run(
         self,
@@ -278,25 +320,96 @@ class PipelineRunner:
                 )
 
         # 2. Sequential Analysis Phase
-        # Filter: only process episodes with external subtitles.
-        # Embedded-only episodes are logged and skipped (no external sub to process).
+        # Filter: only process episodes with external subtitles or extract embedded tracks.
         external_scans = []
         embedded_only_reports = []
         for scan in scan_results:
             _raise_if_stopped(stop_event)
             if scan.subtitle_source == SubtitleSource.EMBEDDED:
-                logger.info(
-                    "skipping embedded-only episode (no external subtitle to process)",
-                    episode=scan.episode_path.name,
-                    embedded_tracks=scan.embedded_sub_info.track_count
-                    if scan.embedded_sub_info
-                    else 0,
-                )
-                embedded_only_reports.append(
-                    EpisodeReport(
-                        episode_path=scan.episode_path,
-                        status=EpisodeStatus.SKIPPED,
+                if (
+                    not self.mkvextract_adapter
+                    or not scan.embedded_sub_info
+                    or not scan.embedded_sub_info.tracks
+                ):
+                    logger.info(
+                        "skipping embedded-only episode (no extraction adapter or no embedded tracks)",
+                        episode=scan.episode_path.name,
+                        embedded_tracks=scan.embedded_sub_info.track_count
+                        if scan.embedded_sub_info
+                        else 0,
                     )
+                    embedded_only_reports.append(
+                        EpisodeReport(
+                            episode_path=scan.episode_path,
+                            status=EpisodeStatus.SKIPPED,
+                        )
+                    )
+                    continue
+
+                selected = self._select_track(
+                    scan.embedded_sub_info,
+                    self.config.subtitle.preferred_language,
+                    self.config.subtitle.strict_language,
+                )
+
+                if selected is None:
+                    logger.warning(
+                        "skipping episode: preferred subtitle language not found",
+                        episode=scan.episode_path.name,
+                        preferred=self.config.subtitle.preferred_language,
+                        available=[t.language for t in scan.embedded_sub_info.tracks],
+                    )
+                    embedded_only_reports.append(
+                        EpisodeReport(
+                            episode_path=scan.episode_path,
+                            status=EpisodeStatus.SKIPPED,
+                        )
+                    )
+                    continue
+
+                exp_date = (
+                    run_timestamp + timedelta(days=self.config.trash_max_age_days)
+                ).strftime("%Y-%m-%d")
+                trash_dir = scan.episode_path.parent / ".anime_studio_trash"
+                extract_path = (
+                    trash_dir / f"EXP-{exp_date}-{scan.episode_path.stem}.tmp.ass"
+                )
+
+                await self.filesystem.ensure_directory(trash_dir)
+                _raise_if_stopped(stop_event)
+
+                async with self.disk_semaphore:
+                    _raise_if_stopped(stop_event)
+                    extract_result = await self.mkvextract_adapter.extract_track(
+                        scan.episode_path,
+                        selected.track_id,
+                        extract_path,
+                        timeout=float(self.config.default_timeout_s),
+                    )
+
+                if not extract_result.success:
+                    logger.error(
+                        "embedded subtitle extraction failed",
+                        episode=scan.episode_path.name,
+                        track_id=selected.track_id,
+                        stderr=extract_result.stderr,
+                    )
+                    embedded_only_reports.append(
+                        EpisodeReport(
+                            episode_path=scan.episode_path,
+                            status=EpisodeStatus.SKIPPED,
+                        )
+                    )
+                    continue
+
+                updated_scan = scan.model_copy(update={"subtitle_path": extract_path})
+                external_scans.append(updated_scan)
+                logger.info(
+                    "embedded subtitle extracted, proceeding to analysis",
+                    episode=scan.episode_path.name,
+                    track_id=selected.track_id,
+                    language=selected.language,
+                    extract_path=str(extract_path),
                 )
             else:
                 external_scans.append(scan)
@@ -395,17 +508,19 @@ class PipelineRunner:
 
                     # Plan trash
                     trash_receipts = []
-                    sub_file = SubtitleFile(
-                        path=ctx.scan_result.subtitle_path,
-                        encoding_detected="utf-8",
-                        encoding_source="repair",
-                        line_ending="\n",
-                        fonts_required=[q.requested_name for q in ctx.font_queries],
-                    )
-                    sub_trash = sub_file.plan_trash_disposal(
-                        run_timestamp, self.config.trash_max_age_days
-                    )
-                    trash_receipts.append(sub_trash)
+                    if ctx.scan_result.subtitle_source == SubtitleSource.EXTERNAL:
+                        assert ctx.scan_result.subtitle_path is not None
+                        sub_file = SubtitleFile(
+                            path=ctx.scan_result.subtitle_path,
+                            encoding_detected="utf-8",
+                            encoding_source="repair",
+                            line_ending="\n",
+                            fonts_required=[q.requested_name for q in ctx.font_queries],
+                        )
+                        sub_trash = sub_file.plan_trash_disposal(
+                            run_timestamp, self.config.trash_max_age_days
+                        )
+                        trash_receipts.append(sub_trash)
 
                     mkv_trash = ctx.mux_job.plan_trash_disposal(
                         run_timestamp, self.config.trash_max_age_days
@@ -417,7 +532,14 @@ class PipelineRunner:
                         sub_path = ctx.scan_result.subtitle_path
                         assert sub_path is not None
                         _raise_if_stopped(stop_event)
-                        await self.filesystem.move_to_trash(sub_path, sub_trash)
+                        if ctx.scan_result.subtitle_source == SubtitleSource.EXTERNAL:
+                            await self.filesystem.move_to_trash(sub_path, sub_trash)
+                        else:
+                            try:
+                                if sub_path.exists():
+                                    sub_path.unlink()
+                            except Exception:
+                                pass
                         _raise_if_stopped(stop_event)
                         await self.filesystem.move_to_trash(
                             ctx.scan_result.episode_path, mkv_trash
@@ -434,6 +556,16 @@ class PipelineRunner:
                         if temp_sub_path.exists():
                             try:
                                 temp_sub_path.unlink()
+                            except Exception:
+                                pass
+                    else:
+                        if (
+                            ctx.scan_result.subtitle_source == SubtitleSource.EMBEDDED
+                            and ctx.scan_result.subtitle_path
+                        ):
+                            try:
+                                if ctx.scan_result.subtitle_path.exists():
+                                    ctx.scan_result.subtitle_path.unlink()
                             except Exception:
                                 pass
 
@@ -676,9 +808,13 @@ class PipelineRunner:
                     status = "skipped"
                 else:
                     status = "failed"
-                trash_path = (
-                    ctx.trash_receipts[0].trash_path if ctx.trash_receipts else None
-                )
+                trash_path = None
+                for r in ctx.trash_receipts:
+                    if r.original_path == ctx.scan_result.episode_path:
+                        trash_path = r.trash_path
+                        break
+                if not trash_path and ctx.trash_receipts:
+                    trash_path = ctx.trash_receipts[-1].trash_path
                 manifest_episodes.append(
                     EpisodeProcessed(
                         episode_path=str(ctx.scan_result.episode_path),

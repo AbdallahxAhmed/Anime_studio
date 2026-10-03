@@ -9,7 +9,7 @@ CACHE_VERSION = "3.0"
 
 class SubtitleConfig(BaseModel):
     preferred_language: str = "ara"
-    strict_language: bool = True
+    strict_language: bool = False
 
 
 class AppConfig(BaseModel):
