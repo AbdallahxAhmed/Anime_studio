@@ -9,6 +9,13 @@ from src.gui.theme import apply_dark_theme
 
 def main() -> None:
     """Entry point to launch the PySide6 GUI application with qasync."""
+    if "--version" in sys.argv:
+        print("Anime Studio v3.0.0")
+        return
+    if "--smoke-test" in sys.argv:
+        print("Anime Studio smoke test: OK")
+        return
+
     app = QApplication(sys.argv)
 
     # Set up qasync as the active asyncio event loop

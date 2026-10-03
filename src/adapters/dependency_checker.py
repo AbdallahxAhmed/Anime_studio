@@ -102,6 +102,21 @@ class DependencyChecker:
 
     def discover_one(self, spec: BinarySpec) -> Path | None:
         if sys.platform == "win32":
+            # Step 0: Portable tool discovery adjacent to executable or in tools/ folder
+            exe_dir = (
+                Path(sys.executable).parent
+                if getattr(sys, "frozen", False)
+                else Path.cwd()
+            )
+            portable_paths = [
+                exe_dir / f"{spec.name}.exe",
+                exe_dir / "tools" / f"{spec.name}.exe",
+                exe_dir / "tools" / spec.win_folder_name / f"{spec.name}.exe",
+            ]
+            for p in portable_paths:
+                if p.is_file() and os.access(p, os.X_OK):
+                    return p
+
             # Step 1: Scoop shim
             shim_path = self.home_dir / "scoop" / "shims" / f"{spec.name}.exe"
             if shim_path.is_file() and os.access(shim_path, os.X_OK):
