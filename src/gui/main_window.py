@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
         self._current_show_name: str | None = None
         self._current_show_path: Path | None = None
         self._stop_event: asyncio.Event | None = None
+        self._folder_scan_cache: dict[Path, LibraryScanOutput] = {}
         self._show_name_text = "Select a show to start"
 
         # Initialize SignalBridge
@@ -473,6 +474,7 @@ class MainWindow(QMainWindow):
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_refresh_index(self) -> None:
         """Full refresh scan of config.library_path."""
+        self._folder_scan_cache.clear()
         library_path = self.config.library_path
         if not library_path:
             return
@@ -602,6 +604,25 @@ class MainWindow(QMainWindow):
     async def _on_show_selected(self, name: str, path: Path) -> None:
         """Load episodes for selected show into EpisodeTableWidget."""
         requested_path = Path(path).expanduser().resolve()
+
+        if self._pipeline_running:
+            return
+
+        if (
+            requested_path != self._current_show_path
+            and requested_path in self._folder_scan_cache
+        ):
+            await self._stop_active_discovery_scan()
+            cached_output = self._folder_scan_cache[requested_path]
+            self.stop_button.setVisible(False)
+            self._episode_table.setEnabled(True)
+            self.undo_button.setEnabled(True)
+            self.settings_btn.setEnabled(True)
+            self._sidebar.set_navigation_enabled(True)
+            self._display_scan_result(name, requested_path, cached_output)
+            self._on_selection_changed(self._episode_table.get_selected_paths())
+            return
+
         scan = await self._start_discovery_scan(
             DiscoveryScanKind.SHOW_SELECTION, requested_path
         )
@@ -615,6 +636,7 @@ class MainWindow(QMainWindow):
                 scan.root, stop_event=scan.stop_event
             )
             self._raise_if_scan_stale(scan)
+            self._folder_scan_cache[scan.root] = scan_output
             self._display_scan_result(name, scan.root, scan_output)
         except asyncio.CancelledError:
             outcome = "stopped"
@@ -666,6 +688,7 @@ class MainWindow(QMainWindow):
                 scan.root, stop_event=scan.stop_event
             )
             self._raise_if_scan_stale(scan)
+            self._folder_scan_cache[scan.root] = scan_output
             status = (
                 ShowStatus.READY if scan_output.episodes else ShowStatus.NO_SUBTITLE
             )
@@ -681,6 +704,10 @@ class MainWindow(QMainWindow):
             await self._show_index.add_show(summary)
             self._raise_if_scan_stale(scan)
             self._sidebar.add_show(summary)
+            if not self.config.library_path:
+                self.config.library_path = scan.root.parent
+                self._library_path_text = str(self.config.library_path)
+                self._render_library_path_label()
             self._display_scan_result(summary.name, scan.root, scan_output)
         except asyncio.CancelledError:
             outcome = "stopped"
@@ -714,15 +741,6 @@ class MainWindow(QMainWindow):
     @asyncSlot()  # type: ignore[untyped-decorator]  # qasync.asyncSlot decorator lacks type hints
     async def _on_run_click(self) -> None:
         """Trigger the forensics pipeline runner asynchronously without blocking the UI thread."""
-        library_path = self.config.library_path
-        if not library_path:
-            QMessageBox.warning(
-                self,
-                "No Library Selected",
-                "Please select an anime library directory first.",
-            )
-            return
-
         selection_generation = self._selection_generation
         run_show_path = self._current_show_path
         run_show_name = self._current_show_name
@@ -749,6 +767,22 @@ class MainWindow(QMainWindow):
                 "Please select at least one episode before running.",
             )
             return
+
+        library_path = self.config.library_path or (
+            run_show_path.parent if run_show_path is not None else None
+        )
+        if not library_path:
+            QMessageBox.warning(
+                self,
+                "No Library Selected",
+                "Please select an anime library directory first.",
+            )
+            return
+
+        if not self.config.library_path and library_path is not None:
+            self.config.library_path = Path(library_path)
+            self._library_path_text = str(self.config.library_path)
+            self._render_library_path_label()
 
         pre_run_status = self._sidebar.get_show_status(run_show_path)
         if pre_run_status is None:
@@ -849,6 +883,7 @@ class MainWindow(QMainWindow):
                 raise PipelineStoppedError("Pipeline stopped by user")
 
             run_result = map_pipeline_report(report, p, config.dry_run)
+            self._folder_scan_cache.pop(run_show_path, None)
 
             # Update statuses on completion
             final_status = ShowStatus.ALL_DONE
@@ -1148,6 +1183,7 @@ class MainWindow(QMainWindow):
                     UndoResult = undo_service_mod.UndoResult
                     undo_res = UndoResult(failed=1)
 
+            self._folder_scan_cache.clear()
             msg = (
                 f"Undo completed.\n\n"
                 f"Restored: {undo_res.restored}\n"

@@ -1,9 +1,4 @@
-from src.tui.bootstrap import create_app
-
-
-def main():
-    app = create_app()
-    app.run()
+from src.__main__ import main
 
 
 if __name__ == "__main__":

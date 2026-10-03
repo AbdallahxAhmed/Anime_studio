@@ -2379,3 +2379,81 @@ async def test_main_window_close_requests_folder_scan_cleanup(
     ]
     assert all(entry["reason"] == "window_close" for entry in entries)
     assert all(entry["scan_generation"] == 1 for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_main_window_swapping_between_cached_shows_does_not_rescan(
+    mocker, tmp_path: Path
+) -> None:
+    """Switching back and forth between already-scanned shows uses cache and avoids rescanning."""
+    show_a = tmp_path / "Show A"
+    show_b = tmp_path / "Show B"
+
+    output_a = _scan_output(show_a, "Show A")
+    output_b = _scan_output(show_b, "Show B")
+
+    def fake_scan(path: Path, **_kwargs: object) -> LibraryScanOutput:
+        if path == show_a.resolve():
+            return output_a
+        return output_b
+
+    runner = mocker.MagicMock()
+    runner.library_scanner.scan_folder = mocker.AsyncMock(side_effect=fake_scan)
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=MockLogBridge(),
+        config=MockConfig(tmp_path),
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    # First scan of Show A
+    await window._on_show_selected.__wrapped__(window, "Show A", show_a)
+    assert runner.library_scanner.scan_folder.call_count == 1
+    assert window._current_show_name == "Show A"
+
+    # First scan of Show B
+    await window._on_show_selected.__wrapped__(window, "Show B", show_b)
+    assert runner.library_scanner.scan_folder.call_count == 2
+    assert window._current_show_name == "Show B"
+
+    # Return to Show A: must use cache, call_count remains 2
+    await window._on_show_selected.__wrapped__(window, "Show A", show_a)
+    assert runner.library_scanner.scan_folder.call_count == 2
+    assert window._current_show_name == "Show A"
+    assert window.run_button.isEnabled() is True
+
+    # Return to Show B: must use cache, call_count remains 2
+    await window._on_show_selected.__wrapped__(window, "Show B", show_b)
+    assert runner.library_scanner.scan_folder.call_count == 2
+    assert window._current_show_name == "Show B"
+    assert window.run_button.isEnabled() is True
+
+
+@pytest.mark.asyncio
+async def test_main_window_run_click_falls_back_to_show_parent_when_no_library_path(
+    mocker, tmp_path: Path
+) -> None:
+    """When config.library_path is None, _on_run_click derives library_path from show folder's parent."""
+    runner = mocker.MagicMock()
+    runner.run = mocker.AsyncMock(return_value=mocker.MagicMock(episodes=[]))
+
+    config = MockConfig(None)  # No configured library path
+    window = MainWindow(
+        pipeline_runner=runner,
+        log_bridge=MockLogBridge(),
+        config=config,
+        font_ingestion_service=mocker.MagicMock(),
+        show_index_manager=MockIndexManager(tmp_path),
+    )
+
+    show_folder = tmp_path / "MyShow"
+    show_folder.mkdir(parents=True, exist_ok=True)
+    _set_active_show(window, show_folder, "MyShow")
+
+    await window._on_run_click.__wrapped__(window)
+
+    runner.run.assert_called_once()
+    called_config = runner.run.call_args[0][0]
+    assert called_config.library_path == tmp_path.resolve()
+    assert window.config.library_path == tmp_path.resolve()
