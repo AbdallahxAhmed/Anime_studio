@@ -111,7 +111,7 @@ async def test_undo_episode_missing_trash(tmp_path, mock_fs):
 
 
 @pytest.mark.anyio
-async def test_undo_episode_conflict(tmp_path, mock_fs):
+async def test_undo_episode_swaps_processed_file_aside(tmp_path, mock_fs):
     service = UndoService(tmp_path, mock_fs)
 
     trash_file = tmp_path / "trash_ep.mkv"
@@ -130,9 +130,15 @@ async def test_undo_episode_conflict(tmp_path, mock_fs):
     )
 
     result = await service.undo_episode(manifest, str(dest_file))
-    assert result.restored == 0
-    assert result.conflicts == 1
-    mock_fs.replace_file.assert_not_called()
+    assert result.restored == 1
+    assert result.conflicts == 0
+    # First the processed file is set aside next to the backup, then the
+    # original comes back.  Nothing is deleted.
+    first, second = mock_fs.replace_file.await_args_list
+    assert first.args[0] == dest_file
+    assert first.args[1].parent == trash_file.parent
+    assert first.args[1].name.startswith("UNDONE-")
+    assert second.args == (trash_file, dest_file)
 
 
 @pytest.mark.anyio

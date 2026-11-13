@@ -3,7 +3,7 @@ from collections import deque
 from datetime import datetime, timezone, timedelta
 from os.path import normcase
 import time
-from typing import Any, Literal
+from typing import Any
 from pathlib import Path
 import shutil
 import structlog
@@ -17,17 +17,24 @@ from src.models.pipeline import (
 )
 from src.models.report import EpisodeStatus, EpisodeReport, PipelineReport
 from src.models.subtitle import SubtitleFile, SubtitleSource, SyncResult
-from src.models.mux import MuxResult
+from src.models.mux import MuxJob, MuxResult
 from src.core.subtitle_repair import repair_ass, extract_fonts
 from src.core.font_resolver import FontResolver
 from src.core.font_ingestion import FontIngestionService
 from src.core.mux_planner import plan_mux
+from src.core.mux_verifier import verify_mux_output
 from src.core.report_writer import render_report, render_incremental_section
 from src.core.library_scanner import LibraryScanner
 from src.core.renderability_service import RenderabilityService
 from src.ports.subprocess import SubprocessPort
 from src.ports.filesystem import FilesystemPort
 from src.ports.mkvextract import MkvextractPort
+from src.ports.mkvmerge import MkvmergePort
+from src.models.run_manifest import (
+    EpisodeProcessed,
+    PipelineCheckpoint,
+    RunManifest,
+)
 from src.adapters.dependency_checker import ToolRegistry
 from src.config import AppConfig
 from src.errors import FontMatchError, PipelineStoppedError
@@ -39,6 +46,27 @@ def _raise_if_stopped(stop_event: asyncio.Event | None) -> None:
     """Stop a pipeline run without representing user intent as a failure."""
     if stop_event is not None and stop_event.is_set():
         raise PipelineStoppedError("Pipeline stopped by user")
+
+
+def _discard(path: Path) -> None:
+    """Best-effort removal of a temporary file this run created."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning(
+            "could not remove temporary file", path=str(path), error=str(error)
+        )
+
+
+def _discard_run_temps(ctx: EpisodeContext, job: MuxJob) -> None:
+    """Remove the temporary files a failed episode left next to the library."""
+    _discard(job.output_path)
+    if job.subtitle_path != ctx.scan_result.subtitle_path:
+        _discard(job.subtitle_path)
+    if ctx.scan_result.subtitle_source == SubtitleSource.EMBEDDED and (
+        ctx.scan_result.subtitle_path is not None
+    ):
+        _discard(ctx.scan_result.subtitle_path)
 
 
 def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
@@ -130,6 +158,7 @@ class PipelineRunner:
         library_scanner: LibraryScanner,
         renderability_service: RenderabilityService | None = None,
         mkvextract_adapter: MkvextractPort | None = None,
+        mkvmerge: MkvmergePort | None = None,
     ) -> None:
         self.font_resolver = font_resolver
         self.subprocess_adapter = subprocess_adapter
@@ -141,6 +170,9 @@ class PipelineRunner:
         self.library_scanner = library_scanner
         self.renderability_service = renderability_service
         self.mkvextract_adapter = mkvextract_adapter
+        # When set, every new file is identified and checked before it may
+        # replace the original (see core/mux_verifier.py).
+        self.mkvmerge = mkvmerge
         self._analysis_lock = asyncio.Lock()
 
     def _select_track(
@@ -402,7 +434,12 @@ class PipelineRunner:
                     )
                     continue
 
-                updated_scan = scan.model_copy(update={"subtitle_path": extract_path})
+                updated_scan = scan.model_copy(
+                    update={
+                        "subtitle_path": extract_path,
+                        "selected_track_id": selected.track_id,
+                    }
+                )
                 external_scans.append(updated_scan)
                 logger.info(
                     "embedded subtitle extracted, proceeding to analysis",
@@ -427,25 +464,66 @@ class PipelineRunner:
             )
             _raise_if_stopped(stop_event)
             episode_contexts.append(ctx)
-            if checkpoint_manager:
-                _raise_if_stopped(stop_event)
-                from src.models.run_manifest import PipelineCheckpoint
 
-                completed_list = list(completed_from_checkpoint) + [
-                    str(c.scan_result.episode_path) for c in episode_contexts
-                ]
-                checkpoint = PipelineCheckpoint(
-                    library_path=str(pipeline_config.library_path),
-                    completed_episodes=tuple(completed_list),
-                    timestamp=run_timestamp.isoformat(),
-                    selected_paths=tuple(
-                        str(sp) for sp in (pipeline_config.selected_paths or ())
-                    ),
-                )
-                await checkpoint_manager.save(checkpoint)
-                _raise_if_stopped(stop_event)
+        # 3. Record each applied episode the moment its file is swapped, so a
+        # stopped or crashed run still leaves an undo record and a checkpoint
+        # that only lists episodes that were really finished.
+        run_tag = run_timestamp.strftime("%H%M%S")
+        record_lock = asyncio.Lock()
+        manifest_id: str | None = None
+        manifest_entries: list[EpisodeProcessed] = []
+        completed_paths: list[str] = list(completed_from_checkpoint)
 
-        # 3. Concurrent Mux Concurrency Semaphore
+        async def _record_applied(ctx: EpisodeContext) -> None:
+            nonlocal manifest_id
+            async with record_lock:
+                if undo_service:
+                    if manifest_id is None:
+                        manifest_id = undo_service.create_manifest_id()
+                    mkv_backup = next(
+                        (
+                            r.trash_path
+                            for r in ctx.trash_receipts
+                            if r.original_path == ctx.scan_result.episode_path
+                        ),
+                        None,
+                    )
+                    extras = tuple(
+                        (str(r.original_path), str(r.trash_path))
+                        for r in ctx.trash_receipts
+                        if r.original_path != ctx.scan_result.episode_path
+                    )
+                    manifest_entries.append(
+                        EpisodeProcessed(
+                            episode_path=str(ctx.scan_result.episode_path),
+                            trash_receipt_path=str(mkv_backup) if mkv_backup else None,
+                            show_name=ctx.scan_result.anime_title,
+                            status="success",
+                            extra_restores=extras,
+                        )
+                    )
+                    await undo_service.save_manifest(
+                        RunManifest(
+                            run_id=str(manifest_id),
+                            timestamp=run_timestamp.isoformat(),
+                            library_path=str(pipeline_config.library_path),
+                            episodes_processed=tuple(manifest_entries),
+                        )
+                    )
+                if checkpoint_manager:
+                    completed_paths.append(str(ctx.scan_result.episode_path))
+                    await checkpoint_manager.save(
+                        PipelineCheckpoint(
+                            library_path=str(pipeline_config.library_path),
+                            completed_episodes=tuple(completed_paths),
+                            timestamp=run_timestamp.isoformat(),
+                            selected_paths=tuple(
+                                str(sp) for sp in (pipeline_config.selected_paths or ())
+                            ),
+                        )
+                    )
+
+        # 4. Concurrent Mux Concurrency Semaphore
         mux_semaphore = self.disk_semaphore
         completed_mux_count = 0
         mux_counter_lock = asyncio.Lock()
@@ -481,33 +559,84 @@ class PipelineRunner:
                     from src.adapters.mkvmerge import MkvmergeAdapter
 
                     mkvmerge_adapter = MkvmergeAdapter(self.subprocess_adapter)
+                    job = ctx.mux_job
+                    before_info: dict[str, Any] | None = None
 
                     if pipeline_config.dry_run:
                         # Simulated success
                         mux_res = MuxResult(
                             success=True,
-                            output_path=ctx.mux_job.output_path,
+                            output_path=job.output_path,
                             duration_ms=0.0,
-                            fonts_attached=len(ctx.mux_job.fonts),
+                            fonts_attached=len(job.fonts),
                             warnings=[],
                         )
                     else:
+                        if self.mkvmerge is not None:
+                            before_info = await self.mkvmerge.identify(
+                                job.episode_path,
+                                timeout=float(self.config.default_timeout_s),
+                            )
+                            job = job.model_copy(
+                                update={
+                                    "existing_subtitle_track_ids": [
+                                        int(t.get("id", 0))
+                                        for t in before_info.get("tracks", [])
+                                        if t.get("type") == "subtitles"
+                                    ]
+                                }
+                            )
                         mux_res = await mkvmerge_adapter.mux(
-                            ctx.mux_job, timeout=float(self.config.mux_timeout_s)
+                            job, timeout=float(self.config.mux_timeout_s)
                         )
 
                     _raise_if_stopped(stop_event)
                     if not mux_res.success:
+                        await asyncio.to_thread(_discard_run_temps, ctx, job)
                         return ctx.model_copy(
                             update={
+                                "mux_job": job,
                                 "mux_result": mux_res,
                                 "status": EpisodeStatus.FAILED,
                                 "errors": ctx.errors + ["mkvmerge muxing failed."],
                             }
                         )
 
+                    # Check the new file before it may replace the original.
+                    if before_info is not None and self.mkvmerge is not None:
+                        after_info = await self.mkvmerge.identify(
+                            job.output_path,
+                            timeout=float(self.config.default_timeout_s),
+                        )
+                        problems = verify_mux_output(before_info, after_info, job)
+                        if problems:
+                            await asyncio.to_thread(_discard_run_temps, ctx, job)
+                            logger.error(
+                                "new file failed verification; original kept",
+                                episode=ctx.scan_result.episode_path.name,
+                                problems=problems,
+                            )
+                            return ctx.model_copy(
+                                update={
+                                    "mux_job": job,
+                                    "mux_result": mux_res,
+                                    "status": EpisodeStatus.FAILED,
+                                    "errors": ctx.errors
+                                    + [
+                                        f"New file failed the check: {p}"
+                                        for p in problems
+                                    ],
+                                }
+                            )
+                    _raise_if_stopped(stop_event)
+
                     # Plan trash
                     trash_receipts = []
+                    mkv_trash = job.plan_trash_disposal(
+                        run_timestamp, self.config.trash_max_age_days, run_tag
+                    )
+                    trash_receipts.append(mkv_trash)
+                    sub_trash = None
                     if ctx.scan_result.subtitle_source == SubtitleSource.EXTERNAL:
                         assert ctx.scan_result.subtitle_path is not None
                         sub_file = SubtitleFile(
@@ -518,56 +647,51 @@ class PipelineRunner:
                             fonts_required=[q.requested_name for q in ctx.font_queries],
                         )
                         sub_trash = sub_file.plan_trash_disposal(
-                            run_timestamp, self.config.trash_max_age_days
+                            run_timestamp, self.config.trash_max_age_days, run_tag
                         )
                         trash_receipts.append(sub_trash)
 
-                    mkv_trash = ctx.mux_job.plan_trash_disposal(
-                        run_timestamp, self.config.trash_max_age_days
-                    )
-                    trash_receipts.append(mkv_trash)
-
                     if not pipeline_config.dry_run:
-                        # Perform trash moves
                         sub_path = ctx.scan_result.subtitle_path
                         assert sub_path is not None
-                        _raise_if_stopped(stop_event)
-                        if ctx.scan_result.subtitle_source == SubtitleSource.EXTERNAL:
-                            await self.filesystem.move_to_trash(sub_path, sub_trash)
-                        else:
-                            try:
-                                if sub_path.exists():
-                                    sub_path.unlink()
-                            except Exception:
-                                pass
-                        _raise_if_stopped(stop_event)
+                        # From here on the swap always runs to the end: a Stop
+                        # request is honoured after the episode is recorded.
                         await self.filesystem.move_to_trash(
                             ctx.scan_result.episode_path, mkv_trash
                         )
-                        _raise_if_stopped(stop_event)
-                        # Atomic replace original MKV with temporary muxed file
-                        assert ctx.mux_job is not None
-                        await self.filesystem.replace_file(
-                            ctx.mux_job.output_path, ctx.scan_result.episode_path
-                        )
-                        _raise_if_stopped(stop_event)
-                        # Cleanup temp ASS file if exists
-                        temp_sub_path = sub_path.with_name(f"{sub_path.stem}.tmp.ass")
-                        if temp_sub_path.exists():
+                        try:
+                            await self.filesystem.replace_file(
+                                job.output_path, ctx.scan_result.episode_path
+                            )
+                        except BaseException:
+                            # Put the original back; never leave a hole.
+                            await self.filesystem.replace_file(
+                                mkv_trash.trash_path, ctx.scan_result.episode_path
+                            )
+                            raise
+                        if sub_trash is not None:
                             try:
-                                temp_sub_path.unlink()
-                            except Exception:
-                                pass
+                                await self.filesystem.move_to_trash(sub_path, sub_trash)
+                            except Exception as sub_error:
+                                logger.warning(
+                                    "could not move subtitle to backup",
+                                    subtitle=str(sub_path),
+                                    error=str(sub_error),
+                                )
+                                trash_receipts.remove(sub_trash)
+                        else:
+                            await asyncio.to_thread(_discard, sub_path)
+                        await asyncio.to_thread(
+                            _discard, sub_path.with_name(f"{sub_path.stem}.tmp.ass")
+                        )
                     else:
                         if (
                             ctx.scan_result.subtitle_source == SubtitleSource.EMBEDDED
                             and ctx.scan_result.subtitle_path
                         ):
-                            try:
-                                if ctx.scan_result.subtitle_path.exists():
-                                    ctx.scan_result.subtitle_path.unlink()
-                            except Exception:
-                                pass
+                            await asyncio.to_thread(
+                                _discard, ctx.scan_result.subtitle_path
+                            )
 
                     # Determine final status
                     has_missing_fonts = len(ctx.missing_fonts) > 0
@@ -582,11 +706,27 @@ class PipelineRunner:
 
                     res_ctx = ctx.model_copy(
                         update={
+                            "mux_job": job,
                             "mux_result": mux_res,
                             "trash_receipts": trash_receipts,
                             "status": final_status,
                         }
                     )
+                    if not pipeline_config.dry_run:
+                        try:
+                            await _record_applied(res_ctx)
+                        except Exception as record_error:
+                            logger.error(
+                                "episode applied but its undo record was not saved",
+                                episode=ctx.scan_result.episode_path.name,
+                                error=str(record_error),
+                            )
+                            res_ctx = res_ctx.model_copy(
+                                update={
+                                    "errors": res_ctx.errors
+                                    + [f"Undo record not saved: {record_error}"]
+                                }
+                            )
 
                     async with mux_counter_lock:
                         completed_mux_count += 1
@@ -793,49 +933,11 @@ class PipelineRunner:
             await self.filesystem.write_file_atomic(report_path, report_md)
             _raise_if_stopped(stop_event)
 
-        # Write RunManifest on completion (normal or stopped)
+        # The undo manifest was written episode by episode (_record_applied).
+        # Clear checkpoint on normal (not stopped) completion of a real run;
+        # a preview must never wipe the resume point of an interrupted run.
         _raise_if_stopped(stop_event)
-        if undo_service and final_contexts:
-            from src.models.run_manifest import RunManifest, EpisodeProcessed
-
-            manifest_episodes = []
-            for ctx in final_contexts:
-                # Map EpisodeStatus to "success", "skipped", "failed"
-                status: Literal["success", "skipped", "failed"]
-                if ctx.status in (EpisodeStatus.COMPLETE, EpisodeStatus.PARTIAL):
-                    status = "success"
-                elif ctx.status == EpisodeStatus.SKIPPED:
-                    status = "skipped"
-                else:
-                    status = "failed"
-                trash_path = None
-                for r in ctx.trash_receipts:
-                    if r.original_path == ctx.scan_result.episode_path:
-                        trash_path = r.trash_path
-                        break
-                if not trash_path and ctx.trash_receipts:
-                    trash_path = ctx.trash_receipts[-1].trash_path
-                manifest_episodes.append(
-                    EpisodeProcessed(
-                        episode_path=str(ctx.scan_result.episode_path),
-                        trash_receipt_path=str(trash_path) if trash_path else None,
-                        show_name=ctx.scan_result.anime_title,
-                        status=status,
-                    )
-                )
-            manifest = RunManifest(
-                run_id=undo_service.create_manifest_id(),
-                timestamp=run_timestamp.isoformat(),
-                library_path=str(pipeline_config.library_path),
-                episodes_processed=tuple(manifest_episodes),
-            )
-            _raise_if_stopped(stop_event)
-            await undo_service.save_manifest(manifest)
-            _raise_if_stopped(stop_event)
-
-        # Clear checkpoint on normal (not stopped) completion
-        _raise_if_stopped(stop_event)
-        if checkpoint_manager:
+        if checkpoint_manager and not pipeline_config.dry_run:
             await checkpoint_manager.clear()
             _raise_if_stopped(stop_event)
 
@@ -1009,7 +1111,14 @@ class PipelineRunner:
             temp_mkv_path = scan.episode_path.with_name(
                 f"{scan.episode_path.stem}.tmp.mkv"
             )
-            job = plan_mux(ctx, temp_mkv_path, dry_run=pipeline_config.dry_run)
+            job = plan_mux(
+                ctx,
+                temp_mkv_path,
+                dry_run=pipeline_config.dry_run,
+                subtitle_path=None if pipeline_config.dry_run else temp_sub_path,
+                subtitle_language=self.config.subtitle.preferred_language,
+                make_default=self.config.subtitle.set_default,
+            )
             _raise_if_stopped(stop_event)
             ctx = ctx.model_copy(update={"mux_job": job})
 

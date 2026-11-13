@@ -3,12 +3,19 @@ from pathlib import Path
 from typing import Literal, Sequence
 
 
+def _as_text(path: str | Path) -> str:
+    return path.as_posix() if isinstance(path, Path) else path
+
+
 @dataclass(frozen=True)
 class EpisodeProcessed:
     episode_path: str | Path
     trash_receipt_path: str | Path | None = None
     show_name: str = ""
     status: Literal["success", "skipped", "failed"] = "success"
+    # Other files moved to backup for this episode (e.g. the external .ass),
+    # as (original_path, backup_path) pairs, so undo can put them back too.
+    extra_restores: Sequence[tuple[str | Path, str | Path]] = ()
 
     def __post_init__(self) -> None:
         # Allow passing Path objects, convert to normalized string
@@ -18,6 +25,14 @@ class EpisodeProcessed:
             object.__setattr__(
                 self, "trash_receipt_path", self.trash_receipt_path.as_posix()
             )
+        object.__setattr__(
+            self,
+            "extra_restores",
+            tuple(
+                (_as_text(original), _as_text(backup))
+                for original, backup in self.extra_restores
+            ),
+        )
 
 
 @dataclass(frozen=True)

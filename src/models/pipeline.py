@@ -68,6 +68,8 @@ class LibraryScanResult(BaseModel):
     subtitle_source: SubtitleSource = SubtitleSource.EXTERNAL
     anime_title: str = Field(min_length=1)
     embedded_sub_info: EmbeddedSubInfo | None = None
+    # Embedded track id the subtitle was extracted from (embedded source only).
+    selected_track_id: int | None = Field(default=None, ge=0)
 
 
 class EpisodeContext(BaseModel):

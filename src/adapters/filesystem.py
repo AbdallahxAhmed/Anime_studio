@@ -25,6 +25,10 @@ class FilesystemAdapter(FilesystemPort):
                 return
 
             dest_path.parent.mkdir(parents=True, exist_ok=True)
+            if dest_path.exists():
+                # Never overwrite an existing backup: it may be the only copy
+                # of a user's original file.
+                raise FileExistsError(f"Backup already exists: {dest_path}")
             shutil.move(str(src_path), str(dest_path))
             logger.info("moved file to trash", source=src_path, trash=dest_path)
 

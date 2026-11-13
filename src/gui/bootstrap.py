@@ -217,6 +217,7 @@ def bootstrap_app(app: QApplication) -> Any:
         library_scanner=library_scanner,
         renderability_service=renderability_service,
         mkvextract_adapter=mkvextract_adapter,
+        mkvmerge=mkvmerge_adapter,
     )
 
     # 4. Create log bridge

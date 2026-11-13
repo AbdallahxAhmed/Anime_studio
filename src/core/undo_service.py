@@ -2,6 +2,7 @@ import asyncio
 import json
 import tomllib
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import List
 import structlog
@@ -10,6 +11,21 @@ from src.models.run_manifest import RunManifest, EpisodeProcessed
 from src.ports.filesystem import FilesystemPort
 
 logger = structlog.get_logger()
+
+
+def _stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _free_path(candidate: Path) -> Path:
+    """Return ``candidate`` or a numbered sibling that does not exist yet."""
+    if not candidate.exists():
+        return candidate
+    for index in range(1, 1000):
+        numbered = candidate.with_name(f"{candidate.stem}-{index}{candidate.suffix}")
+        if not numbered.exists():
+            return numbered
+    raise FileExistsError(f"No free backup name near {candidate}")
 
 
 @dataclass
@@ -51,6 +67,10 @@ class UndoService:
                         trash_receipt_path=ep.get("trash_receipt_path"),
                         show_name=ep.get("show_name", ""),
                         status=ep.get("status", "success"),
+                        extra_restores=tuple(
+                            (str(pair[0]), str(pair[1]))
+                            for pair in ep.get("extra_restores", [])
+                        ),
                     )
                     for ep in data.get("episodes_processed", [])
                 )
@@ -108,9 +128,14 @@ class UndoService:
                 )
             lines.append(f"show_name = {toml_string(ep.show_name)}")
             lines.append(f"status = {toml_string(ep.status)}")
+            if ep.extra_restores:
+                pairs = [[str(o), str(b)] for o, b in ep.extra_restores]
+                lines.append(f"extra_restores = {toml_string(pairs)}")
             lines.append("")
 
-        filepath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temp_path = filepath.with_name(f"{filepath.name}.tmp")
+        temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temp_path.replace(filepath)
 
         # Prune older manifests
         all_files = sorted(
@@ -170,18 +195,37 @@ class UndoService:
         if not trash_exists:
             return UndoResult(missing=1)
 
-        # Check destination exists
+        # After a normal run the processed file sits at the original path.
+        # Undo is a swap: set the processed file aside next to the backup,
+        # then move the original back.  Nothing is deleted.
+        aside_path: Path | None = None
         dest_exists = await asyncio.to_thread(original_path.is_file)
         if dest_exists:
-            return UndoResult(conflicts=1)
+            aside_path = await asyncio.to_thread(
+                _free_path,
+                trash_path.parent / f"UNDONE-{_stamp()}-{original_path.name}",
+            )
 
         try:
-            # MOVE (replace_file)
-            await self.fs.replace_file(trash_path, original_path)
+            if aside_path is not None:
+                await self.fs.replace_file(original_path, aside_path)
+            try:
+                await self.fs.replace_file(trash_path, original_path)
+            except Exception:
+                if aside_path is not None:
+                    # Put the processed file back so the episode is never
+                    # left missing.
+                    await self.fs.replace_file(aside_path, original_path)
+                raise
+
+            for extra_original, extra_backup in target_ep.extra_restores:
+                await self._restore_extra(Path(extra_original), Path(extra_backup))
 
             # Update manifest on disk (clear trash receipt path since it's restored)
             new_episodes = list(manifest.episodes_processed)
-            new_episodes[target_idx] = replace(target_ep, trash_receipt_path=None)
+            new_episodes[target_idx] = replace(
+                target_ep, trash_receipt_path=None, extra_restores=()
+            )
             new_manifest = replace(manifest, episodes_processed=tuple(new_episodes))
             await self.save_manifest(new_manifest)
 
@@ -189,6 +233,19 @@ class UndoService:
         except Exception as e:
             logger.error("Undo restore failed", error=str(e), path=episode_path)
             return UndoResult(failed=1)
+
+    async def _restore_extra(self, original: Path, backup: Path) -> None:
+        """Restore a side file (e.g. an external subtitle) if nothing replaced it."""
+        if not await asyncio.to_thread(backup.is_file):
+            return
+        if await asyncio.to_thread(original.exists):
+            logger.warning(
+                "Undo left side file in backup because the path is in use",
+                original=str(original),
+                backup=str(backup),
+            )
+            return
+        await self.fs.replace_file(backup, original)
 
     async def undo_show(self, manifest: RunManifest, show_name: str) -> UndoResult:
         """Undo all episodes with matching show_name."""

@@ -20,10 +20,24 @@ class MkvmergeAdapter:
             "-o",
             str(job.output_path),
         ]
+        # Options before a file apply to that file's tracks.
+        if job.make_default:
+            for track_id in job.existing_subtitle_track_ids:
+                if track_id != job.replaced_track_id:
+                    args.extend(["--default-track-flag", f"{track_id}:no"])
         if job.replace_embedded_subtitles:
-            args.extend(["--no-subtitles", str(job.episode_path)])
-        else:
-            args.append(str(job.episode_path))
+            if job.replaced_track_id is not None:
+                # Drop only the track being replaced; keep every other subtitle.
+                args.extend(["--subtitle-tracks", f"!{job.replaced_track_id}"])
+            else:
+                args.append("--no-subtitles")
+        args.append(str(job.episode_path))
+        if job.subtitle_language:
+            args.extend(["--language", f"0:{job.subtitle_language}"])
+        if job.subtitle_track_name:
+            args.extend(["--track-name", f"0:{job.subtitle_track_name}"])
+        if job.make_default:
+            args.extend(["--default-track-flag", "0:yes"])
         args.append(str(job.subtitle_path))
         for font in job.fonts:
             args.extend(["--attach-file", str(font.file_path)])
