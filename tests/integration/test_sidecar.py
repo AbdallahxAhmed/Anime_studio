@@ -90,7 +90,11 @@ def test_scan_apply_and_undo_through_the_backend(tmp_path: Path) -> None:
     show.mkdir(parents=True)
     episode = _make_episode(show)
     (show / "Show - 01.ass").write_text(
-        ASS_TEMPLATE.format(text="مرحبا"), encoding="utf-8"
+        # "AnimeStudioNoSuchFontXZ" cannot exist on any host, so the run stays
+        # "partial" (missing fonts) even where Arial and other common fonts
+        # are installed — the assertion below must not depend on the machine.
+        ASS_TEMPLATE.replace("Arial", "AnimeStudioNoSuchFontXZ").format(text="مرحبا"),
+        encoding="utf-8",
     )
     original = episode.read_bytes()
 
@@ -109,6 +113,11 @@ def test_scan_apply_and_undo_through_the_backend(tmp_path: Path) -> None:
 
     client.call("run.start", show_path=str(show), episodes=[row["path"]])
     finished = client.wait_for("run.finished")
+    # A font name that cannot exist on any host keeps this run "partial"
+    # (missing fonts) regardless of what fonts the machine has installed.
+    assert any("NoSuchFont" in m for e in finished["episodes"] for m in e["missing_fonts"]), (
+        finished["episodes"]
+    )
     assert [e["status"] for e in finished["episodes"]] == ["partial"]
     assert any(e["type"] == "progress" for e in client.events)
     assert episode.read_bytes() != original
