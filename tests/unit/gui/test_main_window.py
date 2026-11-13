@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime, timezone
 import logging
 from typing import Any
@@ -1605,6 +1606,9 @@ async def test_main_window_add_folder_library_root_prevents_scan_and_warns(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="case-insensitive paths are Windows-only"
+)
 @pytest.mark.asyncio
 async def test_main_window_add_folder_library_root_windows_case_insensitive(
     mocker, tmp_path: Path

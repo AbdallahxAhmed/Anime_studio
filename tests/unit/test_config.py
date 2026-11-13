@@ -1,3 +1,4 @@
+import sys
 import pytest
 from pathlib import Path
 from pydantic import ValidationError
@@ -64,6 +65,9 @@ def test_app_config_load_from_toml_missing_file():
     assert config.library_path is None
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows drive-letter path semantics"
+)
 def test_app_config_save_to_toml(tmp_path):
     toml_file = tmp_path / "config.toml"
     config = AppConfig(
