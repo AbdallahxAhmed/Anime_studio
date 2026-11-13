@@ -13,6 +13,9 @@ class SubtitleConfig(BaseModel):
     # Mark the new subtitle track as the default one (and clear the flag on
     # the episode's existing subtitle tracks).
     set_default: bool = True
+    # Run alass/ffsubsync on every episode (slow; only for subtitles made for
+    # a different release).
+    sync_by_default: bool = False
 
 
 class AppConfig(BaseModel):
