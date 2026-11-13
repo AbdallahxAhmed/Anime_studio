@@ -1263,15 +1263,15 @@ async def test_pipeline_runner_native_cancellation_cleans_up_owned_mux_task(
 
 @pytest.mark.anyio
 async def test_pipeline_runner_stop_after_episode_record_keeps_undo_and_skips_completion(
-    tmp_path,
-    mock_font_resolver,
-    mock_subprocess,
-    mock_filesystem,
-    mock_tool_registry,
-    mock_font_ingestion_service,
-    disk_semaphore,
-    app_config,
-):
+    tmp_path: Path,
+    mock_font_resolver: MagicMock,
+    mock_subprocess: MagicMock,
+    mock_filesystem: MagicMock,
+    mock_tool_registry: MagicMock,
+    mock_font_ingestion_service: MagicMock,
+    disk_semaphore: asyncio.Semaphore,
+    app_config: AppConfig,
+) -> None:
     scan_output, _ = _single_episode_output(tmp_path)
     runner = _make_runner(
         scan_output,
@@ -1371,15 +1371,15 @@ async def test_pipeline_runner_stop_after_report_write_skips_manifest_and_checkp
 
 @pytest.mark.anyio
 async def test_pipeline_runner_stop_during_manifest_save_still_records_checkpoint(
-    tmp_path,
-    mock_font_resolver,
-    mock_subprocess,
-    mock_filesystem,
-    mock_tool_registry,
-    mock_font_ingestion_service,
-    disk_semaphore,
-    app_config,
-):
+    tmp_path: Path,
+    mock_font_resolver: MagicMock,
+    mock_subprocess: MagicMock,
+    mock_filesystem: MagicMock,
+    mock_tool_registry: MagicMock,
+    mock_font_ingestion_service: MagicMock,
+    disk_semaphore: asyncio.Semaphore,
+    app_config: AppConfig,
+) -> None:
     scan_output, _ = _single_episode_output(tmp_path)
     runner = _make_runner(
         scan_output,
@@ -1470,15 +1470,15 @@ async def test_pipeline_runner_stop_after_checkpoint_clear_never_returns_success
 
 @pytest.mark.anyio
 async def test_pipeline_runner_dry_run_records_nothing(
-    tmp_path,
-    mock_font_resolver,
-    mock_subprocess,
-    mock_filesystem,
-    mock_tool_registry,
-    mock_font_ingestion_service,
-    disk_semaphore,
-    app_config,
-):
+    tmp_path: Path,
+    mock_font_resolver: MagicMock,
+    mock_subprocess: MagicMock,
+    mock_filesystem: MagicMock,
+    mock_tool_registry: MagicMock,
+    mock_font_ingestion_service: MagicMock,
+    disk_semaphore: asyncio.Semaphore,
+    app_config: AppConfig,
+) -> None:
     scan_output, _ = _single_episode_output(tmp_path)
     runner = _make_runner(
         scan_output,

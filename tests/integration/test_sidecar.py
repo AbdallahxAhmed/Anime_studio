@@ -55,6 +55,7 @@ class Client:
             self.events.append(message["params"])
 
     def wait_for(self, kind: str) -> dict[str, Any]:
+        event: dict[str, Any]
         for event in self.events:
             if event.get("type") == kind:
                 return event
