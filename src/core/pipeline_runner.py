@@ -497,7 +497,7 @@ class PipelineRunner:
                         EpisodeProcessed(
                             episode_path=str(ctx.scan_result.episode_path),
                             trash_receipt_path=str(mkv_backup) if mkv_backup else None,
-                            show_name=ctx.scan_result.anime_title,
+                            show_name=anime_title,
                             status="success",
                             extra_restores=extras,
                         )

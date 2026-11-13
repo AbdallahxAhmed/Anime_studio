@@ -37,7 +37,11 @@ class EventForwarder:
                     "message": str(event_dict.get("event", "")),
                 }
             )
-        elif level in _FORWARDED_LEVELS:
+        elif level in _FORWARDED_LEVELS and (
+            level != "info" or any(k in event_dict for k in _PLAIN_KEYS)
+        ):
+            # Info lines only when they concern an episode, font or subtitle;
+            # internal bookkeeping stays in the stderr log.
             self.channel.notify(
                 {
                     "type": "log",

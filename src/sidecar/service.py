@@ -189,12 +189,17 @@ class AppService:
         if not isinstance(episodes, list) or not episodes:
             raise RpcError("'episodes' must be a non-empty list", INVALID_PARAMS)
         library = self.config.library_path or show.parent
+        try:
+            # A season folder belongs to the show folder right under the library.
+            title = show.resolve().relative_to(Path(library).resolve()).parts[0]
+        except (ValueError, IndexError):
+            title = show.name
         pipeline_config = PipelineConfig(
             library_path=library,
             discovery_root=show,
             dry_run=bool(params.get("dry_run", False)),
             sync_enabled=bool(params.get("sync", self.config.subtitle.sync_by_default)),
-            anime_title=show.name,
+            anime_title=title,
             selected_paths=frozenset(Path(str(p)).resolve() for p in episodes),
         )
         run_id = str(uuid.uuid4())
