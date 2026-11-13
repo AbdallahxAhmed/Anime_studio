@@ -378,3 +378,36 @@ async def test_checkpoint_round_trips_windows_paths(tmp_path: Path) -> None:
 )
 def test_decode_subtitle_bytes_handles_arabic_encodings(encoded: bytes) -> None:
     assert decode_subtitle_bytes(encoded) == "مرحبا"
+
+
+# --- P3: a missing font is hunted once per run, not once per episode ---
+
+
+@pytest.mark.anyio
+async def test_missing_font_is_hunted_once_per_run(tmp_path: Path) -> None:
+    from src.core.font_cache import FontCache
+    from src.errors import FontMatchError
+    from src.hunters.registry import HunterRegistry
+    from src.models.font import FontQuery
+
+    hunter = MagicMock()
+    hunter.name = "web"
+    hunter.priority = 4
+    hunter.rate_limit = 0.0
+    hunter.supports.return_value = True
+    hunter.search = AsyncMock(return_value=[])
+    registry = MagicMock(spec=HunterRegistry)
+    registry.iter_hunters.return_value = [hunter]
+    registry.get_circuit.return_value = MagicMock()
+    resolver = FontResolver(registry, FontCache(tmp_path), AppConfig())
+    query = FontQuery(
+        requested_name="Hacen Maghreb",
+        episode_path=tmp_path / "ep1.mkv",
+        anime_title="Show",
+    )
+
+    for _ in range(3):
+        with pytest.raises(FontMatchError):
+            await resolver.resolve(query)
+
+    assert hunter.search.await_count == 1
