@@ -35,6 +35,9 @@ class FontResolver:
         self.cache = cache
         self.config = config
         self._stop_event = stop_event
+        # Fonts already searched everywhere during this run: the same missing
+        # font is used by every episode, so it is hunted once, not per episode.
+        self._run_misses: dict[str, list[str]] = {}
 
     def for_run(
         self,
@@ -54,6 +57,15 @@ class FontResolver:
         _raise_if_stopped(self._stop_event)
         logger.info("Starting font resolution", font_name=query.requested_name)
         audit_trail = []
+
+        miss_key = query.requested_name.casefold()
+        if miss_key in self._run_misses:
+            err = FontMatchError(
+                f"Font '{query.requested_name}' not found on any known source "
+                "(already searched in this run). Mux will proceed without this font."
+            )
+            err.audit_trail = self._run_misses[miss_key]  # type: ignore[attr-defined]  # dynamic property on custom exception subclass
+            raise err
 
         # Layer 1: Cache Lookup
         cached_asset = self.cache.lookup(query.requested_name)
@@ -138,6 +150,7 @@ class FontResolver:
             layers_tried=audit_trail,
             detail="Font could not be located on any known source. Mux will proceed without this font attachment.",
         )
+        self._run_misses[miss_key] = audit_trail
         err = FontMatchError(error_msg)
         err.audit_trail = audit_trail  # type: ignore[attr-defined]  # dynamic property on custom exception subclass
         raise err

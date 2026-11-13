@@ -1262,16 +1262,16 @@ async def test_pipeline_runner_native_cancellation_cleans_up_owned_mux_task(
 
 
 @pytest.mark.anyio
-async def test_pipeline_runner_stop_after_checkpoint_save_skips_mux_and_completion(
-    tmp_path,
-    mock_font_resolver,
-    mock_subprocess,
-    mock_filesystem,
-    mock_tool_registry,
-    mock_font_ingestion_service,
-    disk_semaphore,
-    app_config,
-):
+async def test_pipeline_runner_stop_after_episode_record_keeps_undo_and_skips_completion(
+    tmp_path: Path,
+    mock_font_resolver: MagicMock,
+    mock_subprocess: MagicMock,
+    mock_filesystem: MagicMock,
+    mock_tool_registry: MagicMock,
+    mock_font_ingestion_service: MagicMock,
+    disk_semaphore: asyncio.Semaphore,
+    app_config: AppConfig,
+) -> None:
     scan_output, _ = _single_episode_output(tmp_path)
     runner = _make_runner(
         scan_output,
@@ -1298,17 +1298,22 @@ async def test_pipeline_runner_stop_after_checkpoint_save_skips_mux_and_completi
 
     with pytest.raises(PipelineStoppedError):
         await runner.run(
-            PipelineConfig(library_path=tmp_path, dry_run=True),
+            PipelineConfig(library_path=tmp_path),
             stop_event=stop_event,
             checkpoint_manager=checkpoint_manager,
             undo_service=undo_service,
         )
 
+    # The episode was swapped, so its undo record and checkpoint must exist
+    # even though the user stopped right after it.
+    mock_filesystem.replace_file.assert_awaited_once()
+    undo_service.save_manifest.assert_awaited_once()
     checkpoint_manager.save.assert_awaited_once()
     checkpoint_manager.clear.assert_not_awaited()
-    mock_subprocess.execute.assert_not_awaited()
-    mock_filesystem.write_file_atomic.assert_not_awaited()
-    undo_service.save_manifest.assert_not_awaited()
+    assert all(
+        call.args[0].name != "_AnimeStudio_Report.md"
+        for call in mock_filesystem.write_file_atomic.await_args_list
+    )
 
 
 @pytest.mark.anyio
@@ -1365,16 +1370,16 @@ async def test_pipeline_runner_stop_after_report_write_skips_manifest_and_checkp
 
 
 @pytest.mark.anyio
-async def test_pipeline_runner_stop_after_manifest_save_skips_checkpoint_clear(
-    tmp_path,
-    mock_font_resolver,
-    mock_subprocess,
-    mock_filesystem,
-    mock_tool_registry,
-    mock_font_ingestion_service,
-    disk_semaphore,
-    app_config,
-):
+async def test_pipeline_runner_stop_during_manifest_save_still_records_checkpoint(
+    tmp_path: Path,
+    mock_font_resolver: MagicMock,
+    mock_subprocess: MagicMock,
+    mock_filesystem: MagicMock,
+    mock_tool_registry: MagicMock,
+    mock_font_ingestion_service: MagicMock,
+    disk_semaphore: asyncio.Semaphore,
+    app_config: AppConfig,
+) -> None:
     scan_output, _ = _single_episode_output(tmp_path)
     runner = _make_runner(
         scan_output,
@@ -1401,15 +1406,19 @@ async def test_pipeline_runner_stop_after_manifest_save_skips_checkpoint_clear(
 
     with pytest.raises(PipelineStoppedError):
         await runner.run(
-            PipelineConfig(library_path=tmp_path, dry_run=True),
+            PipelineConfig(library_path=tmp_path),
             stop_event=stop_event,
             checkpoint_manager=checkpoint_manager,
             undo_service=undo_service,
         )
 
-    mock_filesystem.write_file_atomic.assert_awaited_once()
     undo_service.save_manifest.assert_awaited_once()
+    checkpoint_manager.save.assert_awaited_once()
     checkpoint_manager.clear.assert_not_awaited()
+    assert all(
+        call.args[0].name != "_AnimeStudio_Report.md"
+        for call in mock_filesystem.write_file_atomic.await_args_list
+    )
 
 
 @pytest.mark.anyio
@@ -1449,15 +1458,60 @@ async def test_pipeline_runner_stop_after_checkpoint_clear_never_returns_success
 
     with pytest.raises(PipelineStoppedError):
         await runner.run(
-            PipelineConfig(library_path=tmp_path, dry_run=True),
+            PipelineConfig(library_path=tmp_path),
             stop_event=stop_event,
             checkpoint_manager=checkpoint_manager,
             undo_service=undo_service,
         )
 
-    mock_filesystem.write_file_atomic.assert_awaited_once()
     undo_service.save_manifest.assert_awaited_once()
     checkpoint_manager.clear.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_pipeline_runner_dry_run_records_nothing(
+    tmp_path: Path,
+    mock_font_resolver: MagicMock,
+    mock_subprocess: MagicMock,
+    mock_filesystem: MagicMock,
+    mock_tool_registry: MagicMock,
+    mock_font_ingestion_service: MagicMock,
+    disk_semaphore: asyncio.Semaphore,
+    app_config: AppConfig,
+) -> None:
+    scan_output, _ = _single_episode_output(tmp_path)
+    runner = _make_runner(
+        scan_output,
+        mock_font_resolver,
+        mock_subprocess,
+        mock_filesystem,
+        mock_tool_registry,
+        mock_font_ingestion_service,
+        disk_semaphore,
+        app_config,
+    )
+    stop_event = asyncio.Event()
+    checkpoint_manager = MagicMock()
+    checkpoint_manager.load = AsyncMock(return_value=None)
+    checkpoint_manager.save = AsyncMock()
+    checkpoint_manager.clear = AsyncMock()
+    undo_service = MagicMock()
+    undo_service.save_manifest = AsyncMock()
+    undo_service.create_manifest_id = MagicMock(return_value="run-id")
+
+    await runner.run(
+        PipelineConfig(library_path=tmp_path, dry_run=True),
+        stop_event=stop_event,
+        checkpoint_manager=checkpoint_manager,
+        undo_service=undo_service,
+    )
+
+    mock_filesystem.replace_file.assert_not_awaited()
+    mock_filesystem.move_to_trash.assert_not_awaited()
+    undo_service.save_manifest.assert_not_awaited()
+    checkpoint_manager.save.assert_not_awaited()
+    # A preview never wipes the resume point of an interrupted real run.
+    checkpoint_manager.clear.assert_not_awaited()
 
 
 @pytest.mark.anyio

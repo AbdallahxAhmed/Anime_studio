@@ -31,11 +31,12 @@ class SubtitleFile(BaseModel):
     lifecycle: AssetLifecycle = AssetLifecycle.ORIGINAL
 
     def plan_trash_disposal(
-        self, timestamp: datetime, max_age_days: int
+        self, timestamp: datetime, max_age_days: int, run_tag: str | None = None
     ) -> TrashReceipt:
         expiration_time = timestamp + timedelta(days=max_age_days)
         exp_str = expiration_time.strftime("%Y-%m-%d")
-        trash_filename = f"EXP-{exp_str}-{self.path.name}"
+        prefix = f"EXP-{exp_str}-{run_tag}" if run_tag else f"EXP-{exp_str}"
+        trash_filename = f"{prefix}-{self.path.name}"
 
         trash_path = self.path.parent / ".anime_studio_trash" / trash_filename
 

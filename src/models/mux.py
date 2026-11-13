@@ -15,13 +15,23 @@ class MuxJob(BaseModel):
     dry_run: bool = False
     output_path: SerializablePath
     replace_embedded_subtitles: bool = False
+    # Track metadata for the new subtitle track (None keeps mkvmerge defaults).
+    subtitle_language: str | None = None
+    subtitle_track_name: str | None = None
+    make_default: bool = False
+    # Embedded track being replaced; only this track is dropped when set.
+    replaced_track_id: int | None = Field(default=None, ge=0)
+    # Subtitle track ids already in the episode (cleared as default when
+    # ``make_default`` is set).
+    existing_subtitle_track_ids: list[int] = Field(default_factory=list)
 
     def plan_trash_disposal(
-        self, timestamp: datetime, max_age_days: int
+        self, timestamp: datetime, max_age_days: int, run_tag: str | None = None
     ) -> TrashReceipt:
         expiration_time = timestamp + timedelta(days=max_age_days)
         exp_str = expiration_time.strftime("%Y-%m-%d")
-        trash_filename = f"EXP-{exp_str}-{self.episode_path.name}"
+        prefix = f"EXP-{exp_str}-{run_tag}" if run_tag else f"EXP-{exp_str}"
+        trash_filename = f"{prefix}-{self.episode_path.name}"
 
         trash_path = self.episode_path.parent / ".anime_studio_trash" / trash_filename
 

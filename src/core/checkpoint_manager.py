@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tomllib
 from pathlib import Path
 from src.models.run_manifest import PipelineCheckpoint
@@ -17,28 +18,28 @@ class CheckpointManager:
 
     def _save_sync(self, checkpoint: PipelineCheckpoint) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        # Manual TOML serialization to avoid extra dependencies
+        # JSON strings are valid TOML basic strings and escape Windows
+        # backslashes and quotes correctly (raw f-strings did not).
+        quote = json.dumps
         lines = [
-            f'library_path = "{checkpoint.library_path}"',
-            f'timestamp = "{checkpoint.timestamp}"',
+            f"library_path = {quote(str(checkpoint.library_path))}",
+            f"timestamp = {quote(checkpoint.timestamp)}",
             "",
             "completed_episodes = [",
         ]
         for ep in checkpoint.completed_episodes:
-            lines.append(f'  "{ep}",')
+            lines.append(f"  {quote(str(ep))},")
         lines.append("]")
         lines.append("")
         lines.append("selected_paths = [")
         for sp in checkpoint.selected_paths:
-            lines.append(f'  "{sp}",')
+            lines.append(f"  {quote(str(sp))},")
         lines.append("]")
 
-        # Write to a temp file first, then rename for atomicity
+        # Write to a temp file first, then replace atomically
         temp_path = self.checkpoint_path.with_suffix(".tmp")
         temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        if self.checkpoint_path.exists():
-            self.checkpoint_path.unlink()
-        temp_path.rename(self.checkpoint_path)
+        temp_path.replace(self.checkpoint_path)
 
     async def load(self) -> PipelineCheckpoint | None:
         """Load the checkpoint in a separate thread."""

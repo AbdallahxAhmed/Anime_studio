@@ -42,10 +42,30 @@ def _normalize_font_name(raw_name: str) -> str:
     return name
 
 
+def decode_subtitle_bytes(data: bytes) -> str:
+    """Decode subtitle bytes: BOM first, then UTF-8, then Windows-1256 (Arabic).
+
+    Many Arabic .ass files are saved as Windows-1256 or UTF-16; reading them as
+    UTF-8 only made every such episode fail.
+    """
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data[3:].decode("utf-8")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1256", errors="replace")
+
+
+def read_subtitle_text(path: Path) -> str:
+    return decode_subtitle_bytes(Path(path).read_bytes())
+
+
 def repair_ass(path: Path) -> str:
     """Read ASS file, validate structure, defensively skip malformed styles, return content."""
     logger.info("Starting ASS file repair", path=str(path))
-    content = path.read_text(encoding="utf-8")
+    content = read_subtitle_text(path)
     if "[V4+ Styles]" not in content:
         logger.error("Missing [V4+ Styles] section", path=str(path))
         raise EncodingRepairError("Missing [V4+ Styles] section in ASS file.")
